@@ -1,0 +1,3 @@
+[console_scripts]
+microwave-gateway = microwave_ai.gateway:main
+microwave-node = microwave_ai.node:main

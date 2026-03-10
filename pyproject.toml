@@ -1,0 +1,24 @@
+[project]
+name = "microwave-ai"
+version = "0.1.0"
+description = "Phase 0 LAN prototype for Microwave AI: gateway and node services in Python."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "httpx>=0.27.0",
+]
+
+[project.scripts]
+microwave-gateway = "microwave_ai.gateway:main"
+microwave-node = "microwave_ai.node:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["microwave_ai*"]
+
