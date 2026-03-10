@@ -3,6 +3,7 @@ set -e
 
 echo "Microwave AI – gateway quickstart"
 
+REPO_URL="https://github.com/robot-time/Microwave.git"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 

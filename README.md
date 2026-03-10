@@ -1,5 +1,15 @@
+     ________________
+    |.-----------.   |
+    ||   _____   |ooo|
+    ||  |     |  |ooo|
+    ||  |     |  | = |
+    ||  '-----'  | _ |
+    ||___________|[_]|
+    '----------------'
+
 Microwave AI
 ============
+
 
 > A decentralized, volunteer-powered AI inference network – think **BitTorrent for AI**, starting with a tiny LAN prototype.
 
@@ -582,93 +592,72 @@ This keeps the code small and hackable while keeping the **network protocol** cl
 
 ---
 
-## 11. Quickstart – One Command per Machine
+## 11. Quickstart – One Interactive Setup Script
 
-You can spin up a Phase 0 Microwave AI network (gateway + node) with **one command on each machine**.
-
-### 11.1 Gateway (server) – one command
-
-On the machine you want to act as the **central coordinator** (e.g. your home server), run:
+Run **one script** on any machine to set up a gateway, a node, or both.
+The script auto-detects your LAN IP, walks you through a short menu, and starts everything.
 
 ```bash
-git clone https://github.com/robot-time/Microwave-ai.git
-cd Microwave-ai
-bash scripts/microwave-gateway-quickstart.sh
+git clone https://github.com/robot-time/Microwave.git
+cd Microwave
+bash setup.sh
 ```
 
-This script will:
+The script will:
 
-- Create a local Python virtualenv (`.venv`) if needed.
-- Install the `microwave-ai` package in editable mode.
-- Start the gateway at `http://0.0.0.0:8000` and print the **Microwave Network** ASCII banner.
+1. Print the **Microwave Network** ASCII banner.
+2. Auto-detect your machine's LAN IP.
+3. Ask: **Gateway, Node, or Both?**
+4. Ask which model to serve (node) – with a numbered menu.
+5. Check Ollama is installed and pull the model if needed.
+6. Create a `.venv`, install dependencies, and start everything.
 
-Leave this running. The gateway exposes:
+Example session:
 
-- Control plane UI at `http://SERVER_LAN_IP:8000/` (nodes, health, routing).
-- Chat UI at `http://SERVER_LAN_IP:8000/chat-ui` (nice chat experience backed by your LAN nodes).
+```text
+     ________________
+    |.-----------.   |
+    ||   _____   |ooo|
+    ||  |     |  |ooo|
+    ||  |     |  | = |
+    ||  '-----'  | _ |
+    ||___________|[_]|
+    '----------------'
+------------------------------------------------
+Microwave Network – decentralised AI inference
 
-### 11.2 Node(s) – one command each
+  Detected LAN IP: 192.168.20.30
 
-On every machine you want to contribute as a **node** (e.g. your laptop, another server), install [Ollama](https://ollama.com) and pull a model:
+  What do you want to run on this machine?
 
-```bash
-ollama pull llama3.2
+  1) Gateway  (central coordinator – routes requests to nodes)
+  2) Node     (volunteer compute – runs the AI model locally)
+  3) Both     (gateway + node on the same machine)
+
+  Enter 1, 2, or 3: 1
+
+  Gateway port [8000]:
+  Looks good? Start setup (y/n) [y]: y
+
+  Starting gateway on port 8000 ...
+
+  Control plane: http://192.168.20.30:8000/
+  Chat UI:       http://192.168.20.30:8000/chat-ui
 ```
 
-Then clone and run:
+### Adding more nodes
+
+Run `bash setup.sh` on any other machine, choose **Node (2)**, and enter the gateway's IP when prompted.
+Each node auto-detects its own LAN IP and self-registers with the gateway.
+
+### Talk to the network
+
+- **Control plane** (node list, health, ping): `http://GATEWAY_IP:8000/`
+- **Chat UI**: `http://GATEWAY_IP:8000/chat-ui`
+- **Raw API**:
 
 ```bash
-git clone https://github.com/robot-time/Microwave-ai.git
-cd Microwave-ai
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-
-microwave-node \
-  --gateway-url http://SERVER_LAN_IP:8000 \
-  --region LAN \
-  --model llama3.2 \
-  --host THIS_NODE_LAN_IP \
-  --port 9000
-```
-
-Replace:
-
-- `SERVER_LAN_IP` with the gateway server’s IP (e.g. `192.168.20.30`).
-- `THIS_NODE_LAN_IP` with the node machine’s IP (e.g. `192.168.20.34`).
-
-When `microwave-node` starts, it:
-
-- Prints the **Microwave Network (node)** ASCII banner.
-- Registers itself with the gateway via `POST /nodes/register`.
-- Exposes `GET /health` and `POST /infer` for the gateway.
-
-You can run **multiple nodes** by repeating this on more machines with different `--host` / `--port` and possibly different `--model` values.
-
-### 11.3 Talk to the network
-
-Once the gateway and at least one node are running:
-
-- Visit the **control plane**:
-
-  ```text
-  http://SERVER_LAN_IP:8000/
-  ```
-
-  to see registered nodes and ping them.
-
-- Visit the **chat UI**:
-
-  ```text
-  http://SERVER_LAN_IP:8000/chat-ui
-  ```
-
-  to chat with Microwave AI, with responses streamed from your LAN nodes.
-
-If you prefer `curl`, you can still call the raw API:
-
-```bash
-curl -N http://SERVER_LAN_IP:8000/chat \
+curl -N http://GATEWAY_IP:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"prompt": "What is Microwave AI?", "region": "LAN", "model": "llama3.2"}'
 ```
