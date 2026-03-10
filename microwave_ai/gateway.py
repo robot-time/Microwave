@@ -10,6 +10,22 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 import uvicorn
 
 
+def print_banner() -> None:
+    art = r"""
+     ________________
+    |.-----------.   |
+    ||   _____   |ooo|
+    ||  |     |  |ooo|
+    ||  |     |  | = |
+    ||  '-----'  | _ |
+    ||___________|[_]|
+    '----------------'
+------------------------------------------------
+"""
+    print(art)
+    print("Microwave Network (gateway)")
+
+
 @dataclass
 class NodeInfo:
     node_id: str
@@ -757,6 +773,7 @@ async def health_check_nodes() -> JSONResponse:
 
 
 def main() -> None:
+    print_banner()
     parser = argparse.ArgumentParser(description="Microwave AI Gateway")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host")
     parser.add_argument("--port", type=int, default=8000, help="Bind port")

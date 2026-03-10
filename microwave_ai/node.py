@@ -18,6 +18,22 @@ MODEL = os.getenv("MICROWAVE_MODEL", "llama3")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 
+def print_banner() -> None:
+    art = r"""
+     ________________
+    |.-----------.   |
+    ||   _____   |ooo|
+    ||  |     |  |ooo|
+    ||  |     |  | = |
+    ||  '-----'  | _ |
+    ||___________|[_]|
+    '----------------'
+------------------------------------------------
+"""
+    print(art)
+    print("Microwave Network (node)")
+
+
 @app.get("/health")
 async def health() -> Dict[str, Any]:
     return {"status": "ok"}
@@ -73,6 +89,7 @@ async def register_with_gateway(gateway_url: str, host: str, port: int) -> None:
 def main() -> None:
     global GATEWAY_URL, REGION, MODEL
 
+    print_banner()
     parser = argparse.ArgumentParser(description="Microwave AI Node")
     parser.add_argument("--gateway-url", default=GATEWAY_URL, help="Gateway base URL")
     parser.add_argument("--region", default=REGION, help="Region identifier (e.g. LAN)")
