@@ -187,10 +187,14 @@ if [ ! -d ".venv" ]; then
   $PYTHON -m venv .venv
 fi
 # shellcheck disable=SC1091
-if [ "$IS_WINDOWS" = true ]; then
+if [ -f ".venv/Scripts/activate" ]; then
   source .venv/Scripts/activate
-else
+elif [ -f ".venv/bin/activate" ]; then
   source .venv/bin/activate
+else
+  echo -e "  ${RED}Could not find venv activate script.${RESET}"
+  echo "  Tried .venv/Scripts/activate and .venv/bin/activate"
+  exit 1
 fi
 echo "  Installing microwave-ai ..."
 $PYTHON -m pip install --upgrade pip >/dev/null 2>&1 || true
