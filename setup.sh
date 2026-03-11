@@ -130,12 +130,26 @@ if [[ "$ROLE" == "2" ]]; then
   echo ""
 fi
 
+# ── connection mode (node) ────────────────────
+REVERSE_MODE=false
+if [[ "$ROLE" == "2" ]]; then
+  echo -e "  ${BOLD}Connection mode:${RESET}"
+  echo -e "  ${CYAN}a)${RESET} Direct   ${DIM}(node listens on a port – use on LAN or when you control the firewall)${RESET}"
+  echo -e "  ${CYAN}b)${RESET} Reverse  ${DIM}(node connects OUT to gateway – works behind NAT/firewall, no ports needed)${RESET}"
+  echo ""
+  read -rp "  Enter a or b [b]: " _connmode
+  [[ "$_connmode" != "a" && "$_connmode" != "A" ]] && REVERSE_MODE=true
+  echo ""
+fi
+
 # ── node config ───────────────────────────────
 NODE_PORT=9000
 MODEL="llama3.2"
 if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
-  read -rp "  Node port [${NODE_PORT}]: " _nport
-  [ -n "$_nport" ] && NODE_PORT="$_nport"
+  if [[ "$REVERSE_MODE" == false ]]; then
+    read -rp "  Node port [${NODE_PORT}]: " _nport
+    [ -n "$_nport" ] && NODE_PORT="$_nport"
+  fi
 
   echo ""
   echo -e "  ${BOLD}Which model should this node serve?${RESET}"
@@ -176,7 +190,11 @@ if [[ "$ROLE" == "1" || "$ROLE" == "3" ]]; then
 fi
 if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
   echo -e "  Role:        ${CYAN}Node${RESET}"
-  echo -e "  Node IP:     ${CYAN}${NODE_IP}:${NODE_PORT}${RESET}"
+  if [[ "$REVERSE_MODE" == true ]]; then
+    echo -e "  Connection:  ${CYAN}Reverse (WebSocket)${RESET}"
+  else
+    echo -e "  Node IP:     ${CYAN}${NODE_IP}:${NODE_PORT}${RESET}"
+  fi
   echo -e "  Gateway:     ${CYAN}${GATEWAY_URL}${RESET}"
   echo -e "  Model:       ${CYAN}${MODEL}${RESET}"
   echo -e "  Region:      ${CYAN}${REGION}${RESET}"
@@ -245,9 +263,9 @@ if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
   echo ""
 fi
 
-# ── Windows firewall hint ────────────────────
+# ── Windows firewall hint (only for direct HTTP mode) ──
 if command -v ipconfig.exe >/dev/null 2>&1; then
-  if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
+  if [[ ("$ROLE" == "2" || "$ROLE" == "3") && "$REVERSE_MODE" == false ]]; then
     echo -e "${YELLOW}── Windows Firewall ────────────────────────${RESET}"
     echo -e "  The gateway needs to reach this node on port ${CYAN}${NODE_PORT}${RESET}."
     echo -e "  If health checks fail, allow the port through the firewall:"
@@ -282,6 +300,13 @@ elif [[ "$ROLE" == "1" ]]; then
   echo -e "  ${DIM}Chat UI:       http://${NODE_IP}:${GATEWAY_PORT}/chat-ui${RESET}"
   echo ""
   microwave-gateway --host 0.0.0.0 --port "$GATEWAY_PORT"
+elif [[ "$REVERSE_MODE" == true ]]; then
+  echo "  Starting node in reverse mode (WebSocket) ..."
+  microwave-node \
+    --gateway-url "$GATEWAY_URL" \
+    --region "$REGION" \
+    --model "$MODEL" \
+    --reverse
 else
   echo "  Starting node on port ${NODE_PORT} ..."
   microwave-node \

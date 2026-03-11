@@ -1,12 +1,13 @@
 import argparse
 import asyncio
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 import uvicorn
 
@@ -37,6 +38,7 @@ class NodeInfo:
     metadata: Dict[str, Any] = field(default_factory=dict)
     last_heartbeat: float = 0.0
     last_latency_ms: float = -1.0
+    is_ws: bool = False
 
     @property
     def base_url(self) -> str:
@@ -49,6 +51,10 @@ _rr_index = 0
 HEALTH_INTERVAL_SECONDS = 10
 _health_task = None
 
+# WebSocket reverse-connected nodes
+_ws_connections: Dict[str, WebSocket] = {}
+_task_queues: Dict[str, asyncio.Queue] = {}
+
 
 async def _periodic_health_check() -> None:
     """Background loop: ping every registered node every HEALTH_INTERVAL_SECONDS."""
@@ -58,22 +64,49 @@ async def _periodic_health_check() -> None:
             continue
         async with httpx.AsyncClient() as client:
             for node in list(nodes):
-                start = time.perf_counter()
-                try:
-                    resp = await client.get(f"{node.base_url}/health", timeout=3.0)
-                    if resp.status_code == 200:
-                        node.last_heartbeat = time.time()
-                        node.last_latency_ms = (time.perf_counter() - start) * 1000.0
+                if node.is_ws:
+                    ws = _ws_connections.get(node.node_id)
+                    if ws:
+                        try:
+                            start = time.perf_counter()
+                            await ws.send_json({"type": "ping"})
+                            node.last_heartbeat = time.time()
+                            node.last_latency_ms = (time.perf_counter() - start) * 1000.0
+                        except Exception:
+                            node.last_latency_ms = -1.0
                     else:
                         node.last_latency_ms = -1.0
-                except Exception:
-                    node.last_latency_ms = -1.0
+                else:
+                    start = time.perf_counter()
+                    try:
+                        resp = await client.get(f"{node.base_url}/health", timeout=3.0)
+                        if resp.status_code == 200:
+                            node.last_heartbeat = time.time()
+                            node.last_latency_ms = (time.perf_counter() - start) * 1000.0
+                        else:
+                            node.last_latency_ms = -1.0
+                    except Exception:
+                        node.last_latency_ms = -1.0
 
 
 @app.on_event("startup")
 async def start_health_loop() -> None:
     global _health_task
     _health_task = asyncio.create_task(_periodic_health_check())
+
+
+def _upsert_node(node_id: str, host: str, port: int, region: str,
+                 models: List[str], metadata: Dict[str, Any],
+                 is_ws: bool = False) -> NodeInfo:
+    global nodes
+    nodes = deque(n for n in nodes if n.node_id != node_id)
+    info = NodeInfo(
+        node_id=node_id, host=host, port=port, region=region,
+        models=models, metadata=metadata,
+        last_heartbeat=time.time(), last_latency_ms=0.0, is_ws=is_ws,
+    )
+    nodes.append(info)
+    return info
 
 
 @app.post("/nodes/register")
@@ -88,22 +121,60 @@ async def register_node(payload: Dict[str, Any]) -> JSONResponse:
     if not node_id or not host or not port:
         raise HTTPException(status_code=400, detail="node_id, host, and port are required")
 
-    # Replace any existing node with the same id
-    global nodes
-    nodes = deque(
-        n for n in nodes if n.node_id != node_id
-    )
-    nodes.append(
-        NodeInfo(
-            node_id=node_id,
-            host=host,
-            port=int(port),
-            region=region,
-            models=models,
-            metadata=metadata,
-        )
-    )
+    _upsert_node(node_id, host, int(port), region, models, metadata)
     return JSONResponse({"status": "ok"})
+
+
+@app.websocket("/nodes/ws")
+async def node_websocket(ws: WebSocket) -> None:
+    """Reverse-connection endpoint: nodes connect here instead of listening."""
+    await ws.accept()
+    node_id: Optional[str] = None
+    try:
+        reg = await ws.receive_json()
+        if reg.get("type") != "register":
+            await ws.close(code=1008)
+            return
+
+        node_id = reg.get("node_id", f"ws-{uuid.uuid4().hex[:8]}")
+        region = reg.get("region", "LAN")
+        models = reg.get("models", [])
+        metadata = reg.get("metadata", {})
+
+        _upsert_node(node_id, "ws-connected", 0, region, models, metadata, is_ws=True)
+        _ws_connections[node_id] = ws
+        print(f"[ws] Node connected: {node_id} (region={region}, models={models})")
+        await ws.send_json({"type": "registered", "node_id": node_id})
+
+        while True:
+            msg = await ws.receive_json()
+            msg_type = msg.get("type")
+            if msg_type == "chunk":
+                task_id = msg.get("task_id")
+                q = _task_queues.get(task_id)
+                if q:
+                    await q.put(msg.get("data", ""))
+            elif msg_type == "done":
+                task_id = msg.get("task_id")
+                q = _task_queues.get(task_id)
+                if q:
+                    await q.put(None)
+            elif msg_type == "pong":
+                for n in nodes:
+                    if n.node_id == node_id:
+                        n.last_heartbeat = time.time()
+                        break
+
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        if node_id:
+            _ws_connections.pop(node_id, None)
+            global nodes
+            nodes = deque(n for n in nodes if n.node_id != node_id)
+            print(f"[ws] Node disconnected: {node_id}")
 
 
 @app.get("/nodes")
@@ -118,6 +189,7 @@ async def list_nodes() -> List[Dict[str, Any]]:
             "metadata": n.metadata,
             "online": n.last_latency_ms >= 0,
             "last_latency_ms": n.last_latency_ms,
+            "connection": "ws" if n.is_ws else "http",
         }
         for n in nodes
     ]
@@ -872,6 +944,13 @@ async def chat(request: Request) -> StreamingResponse:
     if not node:
         raise HTTPException(status_code=503, detail="No nodes are currently registered")
 
+    if node.is_ws and node.node_id in _ws_connections:
+        return await _chat_via_ws(node, prompt, model)
+    else:
+        return _chat_via_http(node, prompt, model)
+
+
+def _chat_via_http(node: NodeInfo, prompt: str, model: Optional[str]) -> StreamingResponse:
     infer_payload: Dict[str, Any] = {"prompt": prompt}
     if model:
         infer_payload["model"] = model
@@ -892,20 +971,64 @@ async def chat(request: Request) -> StreamingResponse:
     return StreamingResponse(stream_from_node(), media_type="application/octet-stream")
 
 
+async def _chat_via_ws(node: NodeInfo, prompt: str, model: Optional[str]) -> StreamingResponse:
+    ws = _ws_connections[node.node_id]
+    task_id = uuid.uuid4().hex
+    queue: asyncio.Queue = asyncio.Queue()
+    _task_queues[task_id] = queue
+
+    await ws.send_json({
+        "type": "task",
+        "task_id": task_id,
+        "prompt": prompt,
+        "model": model or "",
+    })
+
+    async def stream_from_ws():
+        try:
+            while True:
+                chunk = await asyncio.wait_for(queue.get(), timeout=120.0)
+                if chunk is None:
+                    break
+                if isinstance(chunk, str):
+                    yield chunk.encode("utf-8")
+                else:
+                    yield chunk
+        except asyncio.TimeoutError:
+            yield b'{"error":"node timeout"}'
+        finally:
+            _task_queues.pop(task_id, None)
+
+    return StreamingResponse(stream_from_ws(), media_type="application/octet-stream")
+
+
 @app.post("/nodes/health")
 async def health_check_nodes() -> JSONResponse:
     async with httpx.AsyncClient() as client:
-        for node in nodes:
-            start = time.perf_counter()
-            try:
-                resp = await client.get(f"{node.base_url}/health", timeout=2.0)
-                if resp.status_code == 200:
-                    node.last_heartbeat = time.time()
-                    node.last_latency_ms = (time.perf_counter() - start) * 1000.0
+        for node in list(nodes):
+            if node.is_ws:
+                ws = _ws_connections.get(node.node_id)
+                if ws:
+                    try:
+                        start = time.perf_counter()
+                        await ws.send_json({"type": "ping"})
+                        node.last_heartbeat = time.time()
+                        node.last_latency_ms = (time.perf_counter() - start) * 1000.0
+                    except Exception:
+                        node.last_latency_ms = -1.0
                 else:
                     node.last_latency_ms = -1.0
-            except Exception:
-                node.last_latency_ms = -1.0
+            else:
+                start = time.perf_counter()
+                try:
+                    resp = await client.get(f"{node.base_url}/health", timeout=2.0)
+                    if resp.status_code == 200:
+                        node.last_heartbeat = time.time()
+                        node.last_latency_ms = (time.perf_counter() - start) * 1000.0
+                    else:
+                        node.last_latency_ms = -1.0
+                except Exception:
+                    node.last_latency_ms = -1.0
 
     return JSONResponse({"status": "ok", "count": len(nodes)})
 
