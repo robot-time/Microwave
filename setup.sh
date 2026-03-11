@@ -274,7 +274,7 @@ if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
     echo -e "  ${RED}Ollama still not found in PATH.${RESET}"
     echo "  Install it, restart your terminal, then press Enter to retry."
     read -rp "  Press Enter to re-check (or Ctrl+C to quit)... " _
-  fi
+  done
 
   echo "  Checking if '${MODEL}' is available locally ..."
   if ! ollama list 2>/dev/null | grep -q "$MODEL"; then
