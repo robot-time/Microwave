@@ -162,56 +162,16 @@ fi
 echo -e "  Detected LAN IP: ${CYAN}${NODE_IP}${RESET}"
 echo ""
 
-# ── role selection ────────────────────────────
-echo -e "${BOLD}What do you want to run on this machine?${RESET}"
-echo ""
-echo -e "  ${CYAN}1)${RESET} Gateway  ${DIM}(central coordinator – routes requests to nodes)${RESET}"
-echo -e "  ${CYAN}2)${RESET} Node     ${DIM}(volunteer compute – runs the AI model locally)${RESET}"
-echo -e "  ${CYAN}3)${RESET} Both     ${DIM}(gateway + node on the same machine)${RESET}"
-echo ""
-read -rp "  Enter 1, 2, or 3: " ROLE
-echo ""
-
-if [[ "$ROLE" == "1" || "$ROLE" == "3" ]]; then
-  WAN_IP=$(detect_wan_ip)
-  TAILSCALE_FUNNEL_URL="$(detect_tailscale_funnel_url)"
-  if [ -n "$WAN_IP" ]; then
-    echo -e "  Detected WAN IP: ${CYAN}${WAN_IP}${RESET}"
-  else
-    echo -e "  Detected WAN IP: ${DIM}(unavailable right now)${RESET}"
-  fi
-  if [ -n "$TAILSCALE_FUNNEL_URL" ]; then
-    echo -e "  Existing Funnel: ${CYAN}${TAILSCALE_FUNNEL_URL}${RESET}"
-  fi
-  echo ""
-fi
-
-# ── gateway port ─────────────────────────────
+# ── fixed node mode ───────────────────────────
+# Gateway is no longer prompted. This script is node-only and defaults to reverse mode.
+ROLE="2"
+REVERSE_MODE=true
 GATEWAY_PORT=8000
-if [[ "$ROLE" == "1" || "$ROLE" == "3" ]]; then
-  read -rp "  Gateway port [${GATEWAY_PORT}]: " _port
-  [ -n "$_port" ] && GATEWAY_PORT="$_port"
-fi
-
-# ── gateway URL (for node) ────────────────────
-GATEWAY_URL="http://${NODE_IP}:${GATEWAY_PORT}"
-if [[ "$ROLE" == "2" ]]; then
-  echo -e "  ${YELLOW}You need the gateway's IP to register this node.${RESET}"
-  read -rp "  Enter gateway URL [e.g. http://192.168.20.30:8000]: " GATEWAY_URL
-  echo ""
-fi
-
-# ── connection mode (node) ────────────────────
-REVERSE_MODE=false
-if [[ "$ROLE" == "2" ]]; then
-  echo -e "  ${BOLD}Connection mode:${RESET}"
-  echo -e "  ${CYAN}a)${RESET} Direct   ${DIM}(node listens on a port – use on LAN or when you control the firewall)${RESET}"
-  echo -e "  ${CYAN}b)${RESET} Reverse  ${DIM}(node connects OUT to gateway – works behind NAT/firewall, no ports needed)${RESET}"
-  echo ""
-  read -rp "  Enter a or b [b]: " _connmode
-  [[ "$_connmode" != "a" && "$_connmode" != "A" ]] && REVERSE_MODE=true
-  echo ""
-fi
+DEFAULT_GATEWAY_URL="${MICROWAVE_GATEWAY_URL:-https://electricity-guzzler.tail7917c7.ts.net}"
+GATEWAY_URL="$DEFAULT_GATEWAY_URL"
+echo -e "${BOLD}Mode:${RESET} Node (reverse/WebSocket)"
+echo -e "  Gateway: ${CYAN}${GATEWAY_URL}${RESET}"
+echo ""
 
 # ── node config ───────────────────────────────
 NODE_PORT=9000

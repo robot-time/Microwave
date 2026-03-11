@@ -26,7 +26,7 @@ cd Microwave
 bash setup.sh
 ```
 
-The script auto-detects your IP, asks if you want to run a **Gateway**, a **Node**, or **Both**, picks a model, and starts everything. Once a node connects, it drops you into an **interactive terminal chat** so you can talk to the model right away.
+The script auto-detects your IP, runs in **Node reverse mode** by default, uses the built-in Funnel endpoint, picks a model, and starts everything. Once connected, it drops you into an **interactive terminal chat** so you can talk to the model right away.
 
 #### Quick run (after setup)
 
@@ -90,7 +90,7 @@ Then start the gateway manually:
 
 ### Adding more machines
 
-Run `bash setup.sh` on another computer, choose **Node**, and enter the gateway's IP when prompted. It self-registers automatically and opens the terminal chat.
+Run `bash setup.sh` on another computer. It self-registers automatically to the built-in Funnel endpoint and opens the terminal chat.
 
 ### Use it
 
@@ -135,15 +135,15 @@ On the node machine (anywhere with internet):
 git clone https://github.com/robot-time/Microwave.git
 cd Microwave
 bash setup.sh
-# Choose Node → choose Reverse (default)
-# Enter gateway URL: http://YOUR_GATEWAY_PUBLIC_IP:8000
+# Node reverse mode is automatic
+# Uses built-in Funnel endpoint by default
 ```
 
 Or manually:
 
 ```bash
 microwave-node \
-  --gateway-url http://YOUR_GATEWAY_PUBLIC_IP:8000 \
+  --gateway-url https://electricity-guzzler.tail7917c7.ts.net \
   --region US-EAST \
   --model llama3.2 \
   --reverse
@@ -178,9 +178,8 @@ If you're a friend of Miles and want to connect your machine as a node to his ga
     git clone https://github.com/robot-time/Microwave.git
     cd Microwave
     bash setup.sh
-    # Choose Node
-    # Choose Reverse (WAN)
-    # Gateway URL: http://100.125.40.61:8000
+    # Node reverse mode is automatic
+    # Uses built-in Funnel endpoint
     # Region: ADL
     ```
 
@@ -188,7 +187,7 @@ If you're a friend of Miles and want to connect your machine as a node to his ga
 
     ```bash
     microwave-node \
-      --gateway-url http://100.125.40.61:8000 \
+      --gateway-url https://electricity-guzzler.tail7917c7.ts.net \
       --region ADL \
       --model llama3.2 \
       --reverse
