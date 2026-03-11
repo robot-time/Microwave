@@ -190,8 +190,9 @@ else
   source .venv/bin/activate
 fi
 echo "  Installing microwave-ai ..."
-pip install --upgrade pip >/dev/null
-pip install -e . >/dev/null
+# Use 'python -m pip' so pip can upgrade itself on Windows
+python -m pip install --upgrade pip --quiet 2>/dev/null || true
+python -m pip install -e . --quiet
 echo -e "  ${GREEN}Done.${RESET}"
 echo ""
 
