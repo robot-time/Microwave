@@ -27,7 +27,51 @@ bash setup.sh
 ```
 
 The script auto-detects your IP, asks if you want to run a **Gateway**, a **Node**, or **Both**, picks a model, and starts everything.
+#### Admin-less Windows setup
 
+If you don't have administrator rights on Windows, you can still get running using the Microsoft Store Python and Git Bash:
+
+1. **Install Python from the Microsoft Store**
+   - Open the Microsoft Store and search for **"Python"** (for example, **Python 3.x** from the Python Software Foundation).
+   - Click **Get** / **Install** and wait for it to finish.
+   - When Windows prompts you to **"Open app execution aliases"** or **"Open Settings"**, open the **App execution aliases** settings page and **turn OFF** all toggles for `python.exe` and `python3.exe` so your shell uses the real Python installation.
+
+2. **Install Git for Windows with Git Bash**
+   - Download Git for Windows from `https://git-scm.com/download/win`.
+   - Run the installer (install to your user directory if you don't have admin).
+   - Make sure **Git Bash** is installed/enabled.
+
+3. **Clone the repo using Git Bash**
+   - Open **Git Bash** and run:
+
+   ```bash
+   git clone https://github.com/robot-time/Microwave.git
+   cd Microwave
+   ```
+
+4. **Run the quickstart script in Git Bash**
+   - From inside the repo, run:
+
+   ```bash
+   bash setup.sh
+   ```
+
+   This will create a virtual environment, install Microwave, and start the gateway/node based on your answers.
+
+5. **If the script fails with a virtualenv or package error**
+   - In **Git Bash**, from the project root, run:
+
+   ```bash
+   python -m venv .venv
+   source .venv/Scripts/activate  # note: on Windows, use Scripts not bin
+   pip install --upgrade pip
+   pip install -e .
+   ```
+Then start the gateway manually:
+
+   ```bash
+   microwave-gateway --host 0.0.0.0 --port 8000
+   ```
 ### Adding more machines
 
 Run `bash setup.sh` on another computer, choose **Node**, and enter the gateway's IP when prompted. It self-registers automatically.
