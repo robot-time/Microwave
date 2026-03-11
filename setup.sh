@@ -97,7 +97,7 @@ detect_ip() {
 
 NODE_IP=$(detect_ip)
 WAN_IP=""
-TAILSCALE_FUNNEL_URL=""
+TAILSCALE_FUNNEL_URL="https://electricity-guzzler.tail7917c7.ts.net"
 
 detect_wan_ip() {
   local wan=""
