@@ -11,6 +11,8 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 import uvicorn
 
+from . import __version__
+
 
 def print_banner() -> None:
     art = r"""
@@ -23,9 +25,9 @@ def print_banner() -> None:
     ||___________|[_]|
     '----------------'
 ------------------------------------------------
-"""
+    """
     print(art)
-    print("Microwave Network (gateway)")
+    print(f"Microwave Network (gateway) v{__version__}")
 
 
 @dataclass

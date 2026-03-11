@@ -1,6 +1,6 @@
 [project]
 name = "microwave-ai"
-version = "0.1.0"
+version = "0.2.0"
 description = "Phase 0 LAN prototype for Microwave AI: gateway and node services in Python."
 readme = "README.md"
 requires-python = ">=3.10"

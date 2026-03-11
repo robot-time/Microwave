@@ -11,6 +11,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 import uvicorn
 
+from . import __version__
+
 
 app = FastAPI(title="Microwave AI Node")
 
@@ -37,9 +39,9 @@ def print_banner() -> None:
     ||___________|[_]|
     '----------------'
 ------------------------------------------------
-"""
+    """
     print(art)
-    print("Microwave Network (node)")
+    print(f"Microwave Network (node) v{__version__}")
 
 
 # ── HTTP mode endpoints (used when node listens on a port) ──
@@ -86,7 +88,7 @@ async def register_with_gateway(gateway_url: str, host: str, port: int) -> None:
                     "port": port,
                     "region": REGION,
                     "models": [MODEL],
-                    "metadata": {},
+                    "metadata": {"version": __version__},
                 },
                 timeout=5.0,
             )
@@ -188,7 +190,7 @@ async def _ws_listener(gateway_url: str) -> None:
                     "node_id": NODE_ID,
                     "region": REGION,
                     "models": [MODEL],
-                    "metadata": {},
+                    "metadata": {"version": __version__},
                 }))
 
                 ack = json.loads(await ws.recv())
