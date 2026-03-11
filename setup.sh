@@ -17,6 +17,8 @@ RED="\033[1;31m"
 DIM="\033[2m"
 RESET="\033[0m"
 
+if [ -z "$_SETUP_REEXECED" ]; then
+
 clear
 
 cat << 'EOF'
@@ -153,6 +155,22 @@ else
 fi
 cd "$REPO_DIR"
 echo ""
+
+# ── self-update ───────────────────────────────
+# If this script was launched from outside the repo (e.g. an extracted
+# zip), re-exec from the freshly-pulled repo copy so any fixes in the
+# latest version are always applied.
+if [ -f "setup.sh" ]; then
+  _setup_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  _setup_repo="$(pwd)/setup.sh"
+  if [ "$_setup_self" != "$_setup_repo" ]; then
+    export _SETUP_REEXECED=1
+    export ROLE NODE_IP GATEWAY_PORT GATEWAY_URL NODE_PORT MODEL REGION
+    exec bash "$_setup_repo"
+  fi
+fi
+
+fi  # end _SETUP_REEXECED guard
 
 # ── python venv ───────────────────────────────
 echo -e "${BOLD}── Python environment ──────────────────────${RESET}"
