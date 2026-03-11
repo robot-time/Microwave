@@ -158,10 +158,19 @@ echo ""
 echo -e "${BOLD}── Python environment ──────────────────────${RESET}"
 if [ ! -d ".venv" ]; then
   echo "  Creating .venv ..."
-  python3 -m venv .venv
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -m venv .venv
+  else
+    python -m venv .venv
+  fi
 fi
 # shellcheck disable=SC1091
-source .venv/bin/activate
+# Windows (MINGW/Git Bash) uses Scripts/activate; Unix uses bin/activate
+if [ -f ".venv/Scripts/activate" ]; then
+  source .venv/Scripts/activate
+else
+  source .venv/bin/activate
+fi
 echo "  Installing microwave-ai ..."
 pip install --upgrade pip >/dev/null
 pip install -e . >/dev/null
