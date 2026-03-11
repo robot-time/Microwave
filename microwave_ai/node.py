@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import os
+import socket
 from typing import Any, Dict
 
 import httpx
@@ -12,7 +13,7 @@ import uvicorn
 app = FastAPI(title="Microwave AI Node")
 
 GATEWAY_URL = os.getenv("MICROWAVE_GATEWAY_URL")
-NODE_ID = os.getenv("MICROWAVE_NODE_ID", os.uname().nodename)
+NODE_ID = os.getenv("MICROWAVE_NODE_ID", socket.gethostname())
 REGION = os.getenv("MICROWAVE_REGION", "LAN")
 MODEL = os.getenv("MICROWAVE_MODEL", "llama3")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
