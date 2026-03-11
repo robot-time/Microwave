@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional
@@ -44,6 +45,7 @@ class NodeInfo:
 
 app = FastAPI(title="Microwave AI Gateway")
 nodes: Deque[NodeInfo] = deque()
+_rr_index = 0
 
 
 @app.post("/nodes/register")
@@ -86,6 +88,8 @@ async def list_nodes() -> List[Dict[str, Any]]:
             "region": n.region,
             "models": n.models,
             "metadata": n.metadata,
+            "online": n.last_latency_ms >= 0,
+            "last_latency_ms": n.last_latency_ms,
         }
         for n in nodes
     ]
@@ -354,358 +358,479 @@ async def index() -> str:
     """
 
 
+
 @app.get("/chat-ui", response_class=HTMLResponse)
 async def chat_ui() -> str:
-    # Dedicated chat experience UI
-    return """
+    return r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Microwave AI – Chat</title>
+  <title>Microwave AI</title>
   <style>
-    * { box-sizing: border-box; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      margin: 0;
-      min-height: 100vh;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #000;
       color: #e5e7eb;
-      background: radial-gradient(circle at top, #1e293b 0, #020617 45%, #000000 100%);
+      height: 100vh;
       display: flex;
-      justify-content: center;
-      align-items: stretch;
-    }
-    .shell {
-      width: 100%;
-      max-width: 960px;
-      margin: 1.5rem;
-      display: flex;
-      flex-direction: column;
-      border-radius: 1.25rem;
-      border: 1px solid rgba(148,163,184,0.25);
-      background: radial-gradient(circle at top left, rgba(59,130,246,0.3), transparent 40%), #020617;
-      box-shadow: 0 25px 60px rgba(15,23,42,0.9);
       overflow: hidden;
     }
-    header {
-      padding: 1rem 1.5rem;
+
+    /* ── sidebar ── */
+    #sidebar {
+      width: 220px;
+      min-width: 220px;
+      background: #111;
       display: flex;
-      justify-content: space-between;
-      align-items: center;
-      border-bottom: 1px solid rgba(15,23,42,0.9);
-      background: linear-gradient(to right, rgba(15,23,42,0.95), rgba(15,23,42,0.7));
-    }
-    header h1 {
-      margin: 0;
-      font-size: 1rem;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: #9ca3af;
-    }
-    header .brand {
-      font-weight: 600;
-      font-size: 1.05rem;
-      color: #e5e7eb;
-    }
-    header .pill {
-      border-radius: 999px;
-      border: 1px solid #1f2937;
-      padding: 0.15rem 0.5rem;
-      font-size: 0.7rem;
-      color: #9ca3af;
-      display: inline-flex;
-      align-items: center;
+      flex-direction: column;
+      padding: 0.75rem 0.5rem;
+      border-right: 1px solid #1f1f1f;
       gap: 0.25rem;
     }
-    .status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 999px;
-      background: #22c55e;
+    #newChatBtn {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 0.6rem;
+      border-radius: 0.5rem;
+      cursor: pointer;
+      font-size: 0.85rem;
+      color: #e5e7eb;
+      background: transparent;
+      border: none;
+      width: 100%;
+      text-align: left;
     }
-    main {
+    #newChatBtn:hover { background: #1f1f1f; }
+    #newChatBtn svg { flex-shrink: 0; }
+    .history-label {
+      font-size: 0.68rem;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      padding: 0.5rem 0.6rem 0.2rem;
+    }
+    .history-item {
+      padding: 0.4rem 0.6rem;
+      border-radius: 0.5rem;
+      font-size: 0.82rem;
+      color: #9ca3af;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .history-item:hover { background: #1f1f1f; color: #e5e7eb; }
+    .history-item.active { background: #1f1f1f; color: #e5e7eb; }
+
+    /* ── main chat area ── */
+    #chatArea {
       flex: 1;
       display: flex;
       flex-direction: column;
-      padding: 1.25rem 1.5rem 1rem;
-      gap: 0.75rem;
+      overflow: hidden;
     }
-    .subtitle {
-      font-size: 0.8rem;
-      color: #9ca3af;
-    }
-    .conversation {
+
+    /* ── message list ── */
+    #messages {
       flex: 1;
-      border-radius: 0.9rem;
-      border: 1px solid #1f2937;
-      background: rgba(15,23,42,0.85);
-      padding: 0.9rem;
       overflow-y: auto;
-      font-size: 0.85rem;
-    }
-    .message {
-      margin-bottom: 0.75rem;
-      max-width: 82%;
-      padding: 0.55rem 0.75rem;
-      border-radius: 0.9rem;
-      line-height: 1.4;
-      white-space: pre-wrap;
-    }
-    .message.user {
-      margin-left: auto;
-      background: linear-gradient(to right, #1f2937, #111827);
-      border-bottom-right-radius: 0.2rem;
-    }
-    .message.bot {
-      margin-right: auto;
-      background: linear-gradient(to right, #0f172a, #020617);
-      border-bottom-left-radius: 0.2rem;
-      border: 1px solid rgba(59,130,246,0.4);
-    }
-    .avatar {
-      font-size: 0.7rem;
-      font-weight: 500;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      margin-bottom: 0.2rem;
-      color: #9ca3af;
-    }
-    .input-shell {
-      margin-top: 0.25rem;
-      border-radius: 999px;
-      border: 1px solid rgba(148,163,184,0.4);
-      background: rgba(15,23,42,0.95);
+      padding: 2rem 0;
       display: flex;
-      align-items: center;
-      padding: 0.3rem 0.4rem 0.3rem 0.8rem;
-      gap: 0.5rem;
+      flex-direction: column;
+      gap: 1.5rem;
     }
-    #promptInput {
-      flex: 1;
-      border: none;
-      outline: none;
+    #messages::-webkit-scrollbar { width: 4px; }
+    #messages::-webkit-scrollbar-track { background: transparent; }
+    #messages::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 4px; }
+
+    .msg-row {
+      display: flex;
+      flex-direction: column;
+      padding: 0 10%;
+    }
+    .msg-row.user { align-items: flex-end; }
+    .msg-row.bot  { align-items: flex-start; }
+
+    .bubble {
+      max-width: 70%;
+      font-size: 0.9rem;
+      line-height: 1.55;
+    }
+    .msg-row.user .bubble {
+      background: #2a2a2a;
+      border-radius: 1.1rem 1.1rem 0.25rem 1.1rem;
+      padding: 0.6rem 0.9rem;
+      color: #e5e7eb;
+    }
+    .msg-row.bot .bubble {
       background: transparent;
       color: #e5e7eb;
-      font-size: 0.9rem;
-      padding: 0.45rem 0;
+      white-space: pre-wrap;
     }
-    #promptInput::placeholder {
-      color: #6b7280;
+    .msg-actions {
+      margin-top: 0.3rem;
+      display: flex;
+      gap: 0.35rem;
     }
-    .send-btn {
-      border-radius: 999px;
+    .action-btn {
+      background: none;
       border: none;
-      background: linear-gradient(to right, #2563eb, #4f46e5);
-      color: white;
-      padding: 0.45rem 0.9rem;
-      font-size: 0.8rem;
-      font-weight: 500;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
       cursor: pointer;
-      box-shadow: 0 10px 25px rgba(37,99,235,0.45);
+      color: #6b7280;
+      padding: 0.2rem;
+      border-radius: 0.3rem;
+      display: flex;
+      align-items: center;
     }
-    .send-btn:disabled {
-      opacity: 0.5;
-      cursor: default;
-      box-shadow: none;
+    .action-btn:hover { color: #e5e7eb; background: #1f1f1f; }
+    .action-btn svg { width: 14px; height: 14px; }
+
+    /* ── empty state ── */
+    #emptyState {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      color: #6b7280;
+      font-size: 0.95rem;
+      padding-bottom: 4rem;
     }
-    .send-icon {
-      display: inline-block;
-      border-radius: 999px;
-      width: 16px;
-      height: 16px;
-      background: rgba(15,23,42,0.9);
+    #emptyState .big { font-size: 2rem; }
+
+    /* ── input area ── */
+    #inputArea {
+      padding: 0.75rem 10% 1.25rem;
+    }
+    #inputShell {
+      background: #1a1a1a;
+      border-radius: 1rem;
+      padding: 0.6rem 0.6rem 0.6rem 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      border: 1px solid #2a2a2a;
+    }
+    #promptInput {
+      background: transparent;
+      border: none;
+      outline: none;
+      color: #e5e7eb;
+      font-size: 0.9rem;
+      resize: none;
+      min-height: 24px;
+      max-height: 160px;
+      overflow-y: auto;
+      line-height: 1.5;
+    }
+    #promptInput::placeholder { color: #4b5563; }
+    .input-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .input-left { display: flex; gap: 0.4rem; align-items: center; }
+    .icon-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: #6b7280;
+      padding: 0.25rem;
+      border-radius: 0.4rem;
+      display: flex;
+      align-items: center;
+    }
+    .icon-btn:hover { color: #e5e7eb; background: #2a2a2a; }
+    .model-select {
+      background: #2a2a2a;
+      border: none;
+      color: #9ca3af;
+      font-size: 0.75rem;
+      padding: 0.2rem 0.5rem;
+      border-radius: 0.4rem;
+      cursor: pointer;
+      outline: none;
+    }
+    .model-select:focus { outline: none; }
+    #sendBtn {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: #e5e7eb;
+      border: none;
+      cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 0.7rem;
+      flex-shrink: 0;
     }
-    .footer {
-      margin-top: 0.35rem;
-      font-size: 0.7rem;
-      color: #6b7280;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    .chip-row {
-      display: flex;
-      gap: 0.35rem;
-      flex-wrap: wrap;
-    }
-    .chip {
-      padding: 0.1rem 0.55rem;
-      border-radius: 999px;
-      border: 1px solid #1f2937;
-      font-size: 0.7rem;
-      color: #9ca3af;
-      cursor: pointer;
-    }
-    @media (max-width: 640px) {
-      .shell {
-        margin: 0.75rem;
-      }
-      header {
-        padding-inline: 1rem;
-      }
-      main {
-        padding-inline: 1rem;
-      }
-    }
+    #sendBtn:disabled { opacity: 0.3; cursor: default; }
+    #sendBtn svg { color: #000; }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <header>
-      <div>
-        <div class="brand">Microwave AI</div>
-        <h1>LAN chat · Phase 0</h1>
-      </div>
-      <div class="pill">
-        <span class="status-dot"></span>
-        Gateway online
-      </div>
-    </header>
-    <main>
-      <div>
-        <div class="subtitle">Ask Microwave AI anything. Responses are served from your LAN node.</div>
-      </div>
-      <div id="conversation" class="conversation">
-        <div class="message bot">
-          <div class="avatar">Microwave AI</div>
-          <div>Hey there – I’m running on your local network. What do you want to build?</div>
-        </div>
-      </div>
-      <div class="input-shell">
-        <input id="promptInput" placeholder="Ask Microwave AI to help you design or build something…" />
-        <button id="sendBtn" class="send-btn" type="button">
-          <span>Send</span>
-          <span class="send-icon">↑</span>
-        </button>
-      </div>
-      <div class="footer">
-        <div class="chip-row">
-          <div class="chip" onclick="usePreset('Design a simple landing page for my app.')">Landing page</div>
-          <div class="chip" onclick="usePreset('Explain how this distributed AI network works in plain language.')">Explain Microwave AI</div>
-          <div class="chip" onclick="usePreset('Help me design the next phase of Microwave AI.')">Next phase</div>
-        </div>
-        <div id="status" class="subtitle">Press Enter to send · Shift+Enter for newline</div>
-      </div>
-    </main>
-  </div>
-  <script>
-    const conversationEl = document.getElementById('conversation');
-    const promptEl = document.getElementById('promptInput');
-    const sendBtn = document.getElementById('sendBtn');
-    const statusEl = document.getElementById('status');
 
-    function appendMessage(text, role) {
-      const msg = document.createElement('div');
-      msg.className = 'message ' + role;
-      const avatar = document.createElement('div');
-      avatar.className = 'avatar';
-      avatar.textContent = role === 'user' ? 'You' : 'Microwave AI';
-      const body = document.createElement('div');
-      body.textContent = text;
-      msg.appendChild(avatar);
-      msg.appendChild(body);
-      conversationEl.appendChild(msg);
-      conversationEl.scrollTop = conversationEl.scrollHeight;
-      return body;
+  <!-- Sidebar -->
+  <div id="sidebar">
+    <button id="newChatBtn">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 5v14M5 12h14"/>
+      </svg>
+      New Chat
+    </button>
+    <div class="history-label">Today</div>
+    <div id="historyList"></div>
+  </div>
+
+  <!-- Main -->
+  <div id="chatArea">
+    <div id="messages">
+      <div id="emptyState">
+        <div class="big">⚡</div>
+        <div>Ask Microwave AI anything</div>
+        <div style="font-size:0.75rem;color:#374151;">Running on your local network</div>
+      </div>
+    </div>
+
+    <div id="inputArea">
+      <div id="inputShell">
+        <textarea id="promptInput" rows="1" placeholder="Send a message"></textarea>
+        <div class="input-footer">
+          <div class="input-left">
+            <button class="icon-btn" title="Attach" disabled>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>
+              </svg>
+            </button>
+            <select id="modelSelect" class="model-select">
+              <option value="llama3.2">llama3.2</option>
+              <option value="llama3">llama3</option>
+              <option value="phi3">phi3</option>
+              <option value="deepseek-coder:6.7b">deepseek-coder</option>
+            </select>
+          </div>
+          <button id="sendBtn" disabled>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const messagesEl  = document.getElementById('messages');
+  const emptyState  = document.getElementById('emptyState');
+  const promptEl    = document.getElementById('promptInput');
+  const sendBtn     = document.getElementById('sendBtn');
+  const modelSelect = document.getElementById('modelSelect');
+  const historyList = document.getElementById('historyList');
+
+  let sessions = [];       // [{title, messages:[]}]
+  let activeIdx = -1;
+
+  function newSession() {
+    const s = { title: null, messages: [] };
+    sessions.unshift(s);
+    activeIdx = 0;
+    renderHistory();
+    renderMessages();
+  }
+
+  function renderHistory() {
+    historyList.innerHTML = '';
+    sessions.forEach((s, i) => {
+      const d = document.createElement('div');
+      d.className = 'history-item' + (i === activeIdx ? ' active' : '');
+      d.textContent = s.title || 'New conversation';
+      d.onclick = () => { activeIdx = i; renderHistory(); renderMessages(); };
+      historyList.appendChild(d);
+    });
+  }
+
+  function renderMessages() {
+    const s = sessions[activeIdx];
+    if (!s || s.messages.length === 0) {
+      messagesEl.innerHTML = '';
+      messagesEl.appendChild(emptyState);
+      return;
+    }
+    messagesEl.innerHTML = '';
+    s.messages.forEach(m => appendBubble(m.role, m.text));
+  }
+
+  function appendBubble(role, text, streaming) {
+    const row = document.createElement('div');
+    row.className = 'msg-row ' + role;
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = text;
+    row.appendChild(bubble);
+
+    if (!streaming) {
+      const actions = document.createElement('div');
+      actions.className = 'msg-actions';
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'action-btn';
+      copyBtn.title = 'Copy';
+      copyBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+      </svg>`;
+      copyBtn.onclick = () => navigator.clipboard.writeText(text).catch(() => {});
+      actions.appendChild(copyBtn);
+      row.appendChild(actions);
     }
 
-    async function sendChat() {
-      const prompt = promptEl.value.trim();
-      if (!prompt || sendBtn.disabled) return;
+    messagesEl.appendChild(row);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return bubble;
+  }
 
-      const userBody = appendMessage(prompt, 'user');
-      const botBody = appendMessage('', 'bot');
+  function updateSendBtn() {
+    sendBtn.disabled = promptEl.value.trim().length === 0;
+  }
 
-      promptEl.value = '';
-      statusEl.textContent = 'Sending…';
-      sendBtn.disabled = true;
+  promptEl.addEventListener('input', () => {
+    promptEl.style.height = 'auto';
+    promptEl.style.height = Math.min(promptEl.scrollHeight, 160) + 'px';
+    updateSendBtn();
+  });
 
-      try {
-        const res = await fetch('/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt, region: 'LAN', model: 'llama3.2' }),
-        });
-        if (!res.ok || !res.body) {
-          statusEl.textContent = 'Error: ' + res.status;
-          sendBtn.disabled = false;
-          return;
-        }
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        let fullText = '';
-        let done = false;
-        while (!done) {
-          const result = await reader.read();
-          done = result.done;
-          if (result.value) {
-            const chunk = decoder.decode(result.value, { stream: !done });
-            buffer += chunk;
-            const lines = buffer.split('\\n');
-            buffer = lines.pop();
-            for (const line of lines) {
-              if (!line.trim()) continue;
-              try {
-                const obj = JSON.parse(line);
-                if (typeof obj.response === 'string') {
-                  fullText += obj.response;
-                  botBody.textContent = fullText;
-                  conversationEl.scrollTop = conversationEl.scrollHeight;
-                }
-              } catch (e) {
-                fullText += line;
-                botBody.textContent = fullText;
-                conversationEl.scrollTop = conversationEl.scrollHeight;
+  promptEl.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+  });
+
+  sendBtn.addEventListener('click', doSend);
+
+  async function doSend() {
+    const prompt = promptEl.value.trim();
+    if (!prompt || sendBtn.disabled) return;
+
+    if (activeIdx === -1 || sessions.length === 0) newSession();
+
+    const s = sessions[activeIdx];
+    s.messages.push({ role: 'user', text: prompt });
+    if (!s.title) {
+      s.title = prompt.slice(0, 32) + (prompt.length > 32 ? '…' : '');
+      renderHistory();
+    }
+
+    // remove empty state, add user bubble
+    if (messagesEl.contains(emptyState)) messagesEl.removeChild(emptyState);
+    appendBubble('user', prompt, false);
+
+    promptEl.value = '';
+    promptEl.style.height = 'auto';
+    sendBtn.disabled = true;
+
+    // streaming bot bubble
+    const botBubble = appendBubble('bot', '', true);
+    let fullText = '';
+
+    try {
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, region: 'LAN', model: modelSelect.value }),
+      });
+
+      if (!res.ok || !res.body) {
+        botBubble.textContent = 'Error: ' + res.status;
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let done = false;
+
+      while (!done) {
+        const { value, done: d } = await reader.read();
+        done = d;
+        if (value) {
+          buf += decoder.decode(value, { stream: !done });
+          const lines = buf.split('\\n');
+          buf = lines.pop();
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const obj = JSON.parse(line);
+              if (typeof obj.response === 'string') {
+                fullText += obj.response;
+                botBubble.textContent = fullText;
+                messagesEl.scrollTop = messagesEl.scrollHeight;
               }
+            } catch (_) {
+              fullText += line;
+              botBubble.textContent = fullText;
             }
           }
         }
-        statusEl.textContent = 'Done.';
-      } catch (e) {
-        statusEl.textContent = 'Error: ' + (e && e.message ? e.message : 'unknown');
-      } finally {
-        sendBtn.disabled = false;
       }
-    }
 
-    function usePreset(text) {
-      promptEl.value = text;
+      // add copy button after streaming done
+      const row = botBubble.parentElement;
+      const actions = document.createElement('div');
+      actions.className = 'msg-actions';
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'action-btn';
+      copyBtn.title = 'Copy';
+      copyBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+      </svg>`;
+      copyBtn.onclick = () => navigator.clipboard.writeText(fullText).catch(() => {});
+      actions.appendChild(copyBtn);
+      row.appendChild(actions);
+
+      s.messages.push({ role: 'bot', text: fullText });
+    } catch (e) {
+      botBubble.textContent = 'Error: ' + (e && e.message ? e.message : 'unknown');
+    } finally {
+      sendBtn.disabled = false;
       promptEl.focus();
     }
+  }
 
-    sendBtn.addEventListener('click', sendChat);
-    promptEl.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendChat();
-      }
-    });
-  </script>
+  document.getElementById('newChatBtn').addEventListener('click', () => {
+    newSession();
+    promptEl.focus();
+  });
+
+  // Start with a fresh session
+  newSession();
+  promptEl.focus();
+</script>
 </body>
 </html>
     """
 
+
+
 def choose_node(region: Optional[str]) -> Optional[NodeInfo]:
+    """Round-robin selection, preferring nodes in requested region."""
+    global _rr_index
     if not nodes:
         return None
-    # Simple policy:
-    # - if region is provided, prefer first node matching region
-    # - else, round-robin over all nodes
+
     if region:
-        for n in nodes:
-            if n.region == region:
-                return n
-    # Fallback: rotate deque for naive round-robin
-    nodes.rotate(-1)
-    return nodes[0]
+        candidates = [n for n in nodes if n.region == region]
+        if not candidates:
+            candidates = list(nodes)
+    else:
+        candidates = list(nodes)
+
+    if not candidates:
+        return None
+
+    idx = _rr_index % len(candidates)
+    _rr_index += 1
+    return candidates[idx]
 
 
 @app.post("/chat")
@@ -729,35 +854,18 @@ async def chat(request: Request) -> StreamingResponse:
                 "POST", f"{node.base_url}/infer", json=infer_payload
             ) as resp:
                 if resp.status_code != 200:
-                    # surface basic error to client
                     text = await resp.aread()
                     yield text
                     return
-                # First yield a small JSON header with routing info
-                header = {
-                    "route": {
-                        "node_id": node.node_id,
-                        "host": node.host,
-                        "port": node.port,
-                        "region": node.region,
-                        "model": model or (node.models[0] if node.models else None),
-                    }
-                }
-                yield (httpx.Request("GET", "/").content or b"")  # no-op to satisfy type checkers
-                yield (('{"route": ' + str(header["route"]).replace("'", '"') + '}\\n').encode("utf-8"))
                 async for chunk in resp.aiter_bytes():
-                    if not chunk:
-                        continue
-                    yield chunk
+                    if chunk:
+                        yield chunk
 
     return StreamingResponse(stream_from_node(), media_type="application/octet-stream")
 
 
 @app.post("/nodes/health")
 async def health_check_nodes() -> JSONResponse:
-    """Ping all nodes' /health endpoints and record latency."""
-    import time
-
     async with httpx.AsyncClient() as client:
         for node in nodes:
             start = time.perf_counter()
@@ -766,6 +874,8 @@ async def health_check_nodes() -> JSONResponse:
                 if resp.status_code == 200:
                     node.last_heartbeat = time.time()
                     node.last_latency_ms = (time.perf_counter() - start) * 1000.0
+                else:
+                    node.last_latency_ms = -1.0
             except Exception:
                 node.last_latency_ms = -1.0
 
