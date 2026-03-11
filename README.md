@@ -59,6 +59,9 @@ If you don't have administrator rights on Windows, you can still get running usi
    ```
 
    This will create a virtual environment, install Microwave, and start the gateway/node based on your answers.
+   - On macOS/Linux, the script will also try to auto-install Ollama if missing.
+   - On Windows, if Ollama is missing, the script will pause and ask you to run this in PowerShell:
+     `irm https://ollama.com/install.ps1 | iex`
 
 5. **If the script fails with a virtualenv or package error**
    - In **Git Bash**, from the project root, run:
@@ -135,6 +138,51 @@ microwave-node \
   --model llama3.2 \
   --reverse
 ```
+
+#### Friends of Miles: how to connect as a node
+
+If you're a friend of Miles and want to connect your machine as a node to his gateway:
+
+- **Gateway (Miles)**
+  - On the Linux server running the gateway, find the public IP:
+
+    ```bash
+    curl ifconfig.me
+    # e.g. prints: 119.15.77.11
+    ```
+
+  - Run the gateway via the setup script:
+
+    ```bash
+    git clone https://github.com/robot-time/Microwave.git
+    cd Microwave
+    bash setup.sh
+    # Choose Gateway (or Both)
+    # Use region: ADL
+    ```
+
+- **Friends (your node, anywhere on the internet)**
+  - On your machine:
+
+    ```bash
+    git clone https://github.com/robot-time/Microwave.git
+    cd Microwave
+    bash setup.sh
+    # Choose Node
+    # Choose Reverse (WAN)
+    # Gateway URL: http://119.15.77.11:8000
+    # Region: ADL
+    ```
+
+  - Or run the node manually with the same settings:
+
+    ```bash
+    microwave-node \
+      --gateway-url http://119.15.77.11:8000 \
+      --region ADL \
+      --model llama3.2 \
+      --reverse
+    ```
 
 Both **LAN nodes** (direct HTTP) and **internet nodes** (reverse WebSocket) can connect to the same gateway simultaneously.
 

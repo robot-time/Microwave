@@ -248,9 +248,32 @@ if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
   echo -e "${BOLD}── Ollama check ────────────────────────────${RESET}"
   if ! command -v ollama >/dev/null 2>&1; then
     echo -e "  ${YELLOW}Ollama is not installed (or not in PATH).${RESET}"
-    echo "  Install it from https://ollama.com and re-run this script."
-    echo "  Or install it now and press Enter to continue."
-    read -rp "  Press Enter once Ollama is installed... " _
+    echo "  Trying automatic install ..."
+
+    if command -v ipconfig.exe >/dev/null 2>&1; then
+      echo "  Windows detected."
+      echo "  Please open PowerShell and run:"
+      echo "    irm https://ollama.com/install.ps1 | iex"
+      echo "  Then come back here and press Enter."
+      read -rp "  Press Enter once Ollama is installed... " _
+    else
+      # macOS + Linux installer
+      if bash -c "curl -fsSL https://ollama.com/install.sh | sh"; then
+        echo -e "  ${GREEN}Ollama install command completed.${RESET}"
+      else
+        echo -e "  ${YELLOW}Auto-install failed.${RESET}"
+        echo "  Please run this manually and then come back:"
+        echo "    curl -fsSL https://ollama.com/install.sh | sh"
+        read -rp "  Press Enter once Ollama is installed... " _
+      fi
+    fi
+  fi
+
+  # Final verification loop to ensure ollama is actually available
+  while ! command -v ollama >/dev/null 2>&1; do
+    echo -e "  ${RED}Ollama still not found in PATH.${RESET}"
+    echo "  Install it, restart your terminal, then press Enter to retry."
+    read -rp "  Press Enter to re-check (or Ctrl+C to quit)... " _
   fi
 
   echo "  Checking if '${MODEL}' is available locally ..."
