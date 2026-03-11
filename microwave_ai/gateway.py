@@ -46,6 +46,34 @@ class NodeInfo:
 app = FastAPI(title="Microwave AI Gateway")
 nodes: Deque[NodeInfo] = deque()
 _rr_index = 0
+HEALTH_INTERVAL_SECONDS = 10
+_health_task = None
+
+
+async def _periodic_health_check() -> None:
+    """Background loop: ping every registered node every HEALTH_INTERVAL_SECONDS."""
+    while True:
+        await asyncio.sleep(HEALTH_INTERVAL_SECONDS)
+        if not nodes:
+            continue
+        async with httpx.AsyncClient() as client:
+            for node in list(nodes):
+                start = time.perf_counter()
+                try:
+                    resp = await client.get(f"{node.base_url}/health", timeout=3.0)
+                    if resp.status_code == 200:
+                        node.last_heartbeat = time.time()
+                        node.last_latency_ms = (time.perf_counter() - start) * 1000.0
+                    else:
+                        node.last_latency_ms = -1.0
+                except Exception:
+                    node.last_latency_ms = -1.0
+
+
+@app.on_event("startup")
+async def start_health_loop() -> None:
+    global _health_task
+    _health_task = asyncio.create_task(_periodic_health_check())
 
 
 @app.post("/nodes/register")
@@ -755,7 +783,7 @@ async def chat_ui() -> str:
         done = d;
         if (value) {
           buf += decoder.decode(value, { stream: !done });
-          const lines = buf.split('\\n');
+          const lines = buf.split('\n');
           buf = lines.pop();
           for (const line of lines) {
             if (!line.trim()) continue;

@@ -8,6 +8,25 @@ set -e
 REPO_URL="https://github.com/robot-time/Microwave.git"
 REPO_DIR="Microwave"
 
+# ── platform detection ───────────────────────
+IS_WINDOWS=false
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=true ;;
+esac
+
+# ── find python binary ───────────────────────
+PYTHON=""
+for cmd in python3 python; do
+  if command -v "$cmd" >/dev/null 2>&1; then
+    PYTHON="$cmd"
+    break
+  fi
+done
+if [ -z "$PYTHON" ]; then
+  echo "ERROR: Python not found. Install Python 3.10+ and re-run."
+  exit 1
+fi
+
 # ── colours ──────────────────────────────────
 BOLD="\033[1m"
 CYAN="\033[1;36m"
@@ -38,13 +57,20 @@ echo ""
 # ── detect LAN IP ─────────────────────────────
 detect_ip() {
   local ip=""
-  if command -v ip >/dev/null 2>&1; then
+  # Linux: ip route
+  if [ -z "$ip" ] && command -v ip >/dev/null 2>&1; then
     ip=$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ { print $7; exit }')
   fi
-  if [ -z "$ip" ] && command -v ipconfig >/dev/null 2>&1; then
+  # macOS: ipconfig getifaddr
+  if [ -z "$ip" ] && [ "$IS_WINDOWS" = false ] && command -v ipconfig >/dev/null 2>&1; then
     ip=$(ipconfig getifaddr en0 2>/dev/null || true)
     [ -z "$ip" ] && ip=$(ipconfig getifaddr en1 2>/dev/null || true)
   fi
+  # Windows (Git Bash / MINGW): parse ipconfig output for IPv4
+  if [ -z "$ip" ] && [ "$IS_WINDOWS" = true ]; then
+    ip=$(ipconfig.exe 2>/dev/null | grep -i "IPv4" | head -1 | sed 's/.*: //' | tr -d '\r')
+  fi
+  # Fallback: hostname -I (Linux)
   if [ -z "$ip" ] && command -v hostname >/dev/null 2>&1; then
     ip=$(hostname -I 2>/dev/null | awk '{print $1}')
   fi
@@ -158,13 +184,17 @@ echo ""
 echo -e "${BOLD}── Python environment ──────────────────────${RESET}"
 if [ ! -d ".venv" ]; then
   echo "  Creating .venv ..."
-  python3 -m venv .venv
+  $PYTHON -m venv .venv
 fi
 # shellcheck disable=SC1091
-source .venv/bin/activate
+if [ "$IS_WINDOWS" = true ]; then
+  source .venv/Scripts/activate
+else
+  source .venv/bin/activate
+fi
 echo "  Installing microwave-ai ..."
-pip install --upgrade pip >/dev/null
-pip install -e . >/dev/null
+$PYTHON -m pip install --upgrade pip >/dev/null 2>&1
+$PYTHON -m pip install -e . >/dev/null
 echo -e "  ${GREEN}Done.${RESET}"
 echo ""
 
@@ -185,6 +215,16 @@ if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
   else
     echo -e "  ${GREEN}Model '${MODEL}' already present.${RESET}"
   fi
+  echo ""
+fi
+
+# ── Windows firewall hint ────────────────────
+if [[ "$IS_WINDOWS" = true && ("$ROLE" == "2" || "$ROLE" == "3") ]]; then
+  echo -e "${YELLOW}── Windows Firewall ────────────────────────${RESET}"
+  echo -e "  The gateway needs to reach this node on port ${CYAN}${NODE_PORT}${RESET}."
+  echo -e "  If health checks fail, allow the port through the firewall:"
+  echo -e "  ${DIM}  (Run in an Admin PowerShell)${RESET}"
+  echo -e "  ${CYAN}netsh advfirewall firewall add rule name=\"Microwave Node\" dir=in action=allow protocol=TCP localport=${NODE_PORT}${RESET}"
   echo ""
 fi
 
