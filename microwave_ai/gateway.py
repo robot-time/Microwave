@@ -130,6 +130,7 @@ async def register_node(payload: Dict[str, Any]) -> JSONResponse:
 @app.websocket("/nodes/ws")
 async def node_websocket(ws: WebSocket) -> None:
     """Reverse-connection endpoint: nodes connect here instead of listening."""
+    global nodes
     await ws.accept()
     node_id: Optional[str] = None
     try:
@@ -174,7 +175,6 @@ async def node_websocket(ws: WebSocket) -> None:
     finally:
         if node_id:
             _ws_connections.pop(node_id, None)
-            global nodes
             nodes = deque(n for n in nodes if n.node_id != node_id)
             print(f"[ws] Node disconnected: {node_id}")
 

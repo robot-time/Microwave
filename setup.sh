@@ -96,6 +96,18 @@ detect_ip() {
 }
 
 NODE_IP=$(detect_ip)
+WAN_IP=""
+
+detect_wan_ip() {
+  local wan=""
+  if command -v curl >/dev/null 2>&1; then
+    wan=$(curl -fsS --max-time 3 https://api.ipify.org 2>/dev/null || true)
+  fi
+  if [ -z "$wan" ] && command -v wget >/dev/null 2>&1; then
+    wan=$(wget -qO- --timeout=3 https://api.ipify.org 2>/dev/null || true)
+  fi
+  echo "$wan"
+}
 
 if [ -z "$NODE_IP" ]; then
   echo -e "${RED}Could not auto-detect your LAN IP.${RESET}"
@@ -114,6 +126,16 @@ echo -e "  ${CYAN}3)${RESET} Both     ${DIM}(gateway + node on the same machine)
 echo ""
 read -rp "  Enter 1, 2, or 3: " ROLE
 echo ""
+
+if [[ "$ROLE" == "1" || "$ROLE" == "3" ]]; then
+  WAN_IP=$(detect_wan_ip)
+  if [ -n "$WAN_IP" ]; then
+    echo -e "  Detected WAN IP: ${CYAN}${WAN_IP}${RESET}"
+  else
+    echo -e "  Detected WAN IP: ${DIM}(unavailable right now)${RESET}"
+  fi
+  echo ""
+fi
 
 # ── gateway port ─────────────────────────────
 GATEWAY_PORT=8000
@@ -185,6 +207,9 @@ echo -e "${BOLD}── Setup summary ──────────────�
 if [[ "$ROLE" == "1" || "$ROLE" == "3" ]]; then
   echo -e "  Role:        ${CYAN}Gateway${RESET}"
   echo -e "  Gateway URL: ${CYAN}http://${NODE_IP}:${GATEWAY_PORT}${RESET}"
+  if [ -n "$WAN_IP" ]; then
+    echo -e "  WAN URL:     ${CYAN}http://${WAN_IP}:${GATEWAY_PORT}${RESET}"
+  fi
   echo -e "  Control:     ${CYAN}http://${NODE_IP}:${GATEWAY_PORT}/${RESET}"
   echo -e "  Chat UI:     ${CYAN}http://${NODE_IP}:${GATEWAY_PORT}/chat-ui${RESET}"
 fi
@@ -321,6 +346,9 @@ elif [[ "$ROLE" == "1" ]]; then
   echo ""
   echo -e "  ${DIM}Control plane: http://${NODE_IP}:${GATEWAY_PORT}/${RESET}"
   echo -e "  ${DIM}Chat UI:       http://${NODE_IP}:${GATEWAY_PORT}/chat-ui${RESET}"
+  if [ -n "$WAN_IP" ]; then
+    echo -e "  ${DIM}WAN base URL:  http://${WAN_IP}:${GATEWAY_PORT}${RESET}"
+  fi
   echo ""
   microwave-gateway --host 0.0.0.0 --port "$GATEWAY_PORT"
 elif [[ "$REVERSE_MODE" == true ]]; then
