@@ -44,6 +44,7 @@ If you don't have administrator rights on Windows, you can still get running usi
 
 3. **Clone the repo using Git Bash**
    - Open **Git Bash** and run:
+   - To paste commands into Git Bash, **right‑click in the window and choose “Paste”** (Ctrl+V usually does not work).
 
    ```bash
    git clone https://github.com/robot-time/Microwave.git
