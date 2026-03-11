@@ -193,8 +193,11 @@ else
   source .venv/bin/activate
 fi
 echo "  Installing microwave-ai ..."
-$PYTHON -m pip install --upgrade pip >/dev/null 2>&1
-$PYTHON -m pip install -e . >/dev/null
+$PYTHON -m pip install --upgrade pip >/dev/null 2>&1 || true
+$PYTHON -m pip install -e . >/dev/null 2>&1 || {
+  echo -e "  ${RED}pip install failed. Trying with --user ...${RESET}"
+  $PYTHON -m pip install -e . --user >/dev/null 2>&1 || true
+}
 echo -e "  ${GREEN}Done.${RESET}"
 echo ""
 
