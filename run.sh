@@ -10,6 +10,7 @@ YELLOW="\033[1;33m"
 RED="\033[1;31m"
 DIM="\033[2m"
 RESET="\033[0m"
+CONFIG_FILE=".microwave.env"
 
 if [ ! -f "pyproject.toml" ]; then
   echo -e "${RED}run.sh must be executed from the Microwave repo root.${RESET}"
@@ -18,6 +19,12 @@ fi
 
 if [ ! -d ".venv" ]; then
   echo -e "${RED}No .venv found.${RESET} Run bash setup.sh first."
+  exit 1
+fi
+
+if [ ! -f "$CONFIG_FILE" ]; then
+  echo -e "${RED}No saved config found (${CONFIG_FILE}).${RESET}"
+  echo "Run bash setup.sh once to save startup settings."
   exit 1
 fi
 
@@ -34,6 +41,7 @@ if [ -z "$VENV_BIN" ]; then
 fi
 
 export PATH="$VENV_BIN:$PATH"
+source "$CONFIG_FILE"
 
 if ! command -v microwave-gateway >/dev/null 2>&1 || ! command -v microwave-node >/dev/null 2>&1; then
   echo -e "${YELLOW}Microwave commands not found in venv; reinstalling package...${RESET}"
@@ -67,79 +75,25 @@ detect_ip() {
 LAN_IP=$(detect_ip)
 [ -z "$LAN_IP" ] && LAN_IP="0.0.0.0"
 
-echo -e "${BOLD}Microwave quick run${RESET} ${DIM}(already installed mode)${RESET}"
-echo -e "LAN IP: ${CYAN}${LAN_IP}${RESET}"
-echo ""
-echo -e "  ${CYAN}1)${RESET} Gateway"
-echo -e "  ${CYAN}2)${RESET} Node"
-echo -e "  ${CYAN}3)${RESET} Both"
-echo ""
-read -rp "Choose 1, 2, or 3: " ROLE
+echo -e "${BOLD}Microwave quick run${RESET} ${DIM}(using saved config)${RESET}"
+echo -e "LAN IP:    ${CYAN}${LAN_IP}${RESET}"
+echo -e "Gateway:   ${CYAN}${MICROWAVE_GATEWAY_URL}${RESET}"
+echo -e "Model:     ${CYAN}${MICROWAVE_MODEL}${RESET}"
+echo -e "Region:    ${CYAN}${MICROWAVE_REGION}${RESET}"
+echo -e "Reverse:   ${CYAN}${MICROWAVE_REVERSE_MODE}${RESET}"
 echo ""
 
-GATEWAY_PORT=8000
-NODE_PORT=9000
-REGION="LAN"
-MODEL="llama3.2"
-REVERSE_MODE=false
-GATEWAY_URL="http://${LAN_IP}:${GATEWAY_PORT}"
-
-if [[ "$ROLE" == "1" || "$ROLE" == "3" ]]; then
-  read -rp "Gateway port [8000]: " _gp
-  [ -n "$_gp" ] && GATEWAY_PORT="$_gp"
-  GATEWAY_URL="http://${LAN_IP}:${GATEWAY_PORT}"
-fi
-
-if [[ "$ROLE" == "2" ]]; then
-  read -rp "Gateway URL [http://SERVER_IP:8000]: " _gw
-  [ -n "$_gw" ] && GATEWAY_URL="$_gw"
-  echo ""
-  read -rp "Use reverse mode (works behind NAT/firewall)? [Y/n]: " _r
-  [[ "$_r" != "n" && "$_r" != "N" ]] && REVERSE_MODE=true
-fi
-
-if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
-  if [[ "$REVERSE_MODE" == false ]]; then
-    read -rp "Node port [9000]: " _np
-    [ -n "$_np" ] && NODE_PORT="$_np"
-  fi
-  read -rp "Model [llama3.2]: " _m
-  [ -n "$_m" ] && MODEL="$_m"
-  read -rp "Region [LAN]: " _rgn
-  [ -n "$_rgn" ] && REGION="$_rgn"
-fi
-
-echo ""
-echo -e "${BOLD}Starting...${RESET}"
-
-if [[ "$ROLE" == "1" ]]; then
-  echo -e "${DIM}Gateway: http://${LAN_IP}:${GATEWAY_PORT}${RESET}"
-  microwave-gateway --host 0.0.0.0 --port "$GATEWAY_PORT"
-elif [[ "$ROLE" == "2" ]]; then
-  if [[ "$REVERSE_MODE" == true ]]; then
-    microwave-node \
-      --gateway-url "$GATEWAY_URL" \
-      --region "$REGION" \
-      --model "$MODEL" \
-      --reverse
-  else
-    microwave-node \
-      --gateway-url "$GATEWAY_URL" \
-      --region "$REGION" \
-      --model "$MODEL" \
-      --host "$LAN_IP" \
-      --port "$NODE_PORT"
-  fi
-else
-  echo -e "${DIM}Gateway: http://${LAN_IP}:${GATEWAY_PORT}${RESET}"
-  microwave-gateway --host 0.0.0.0 --port "$GATEWAY_PORT" &
-  GATEWAY_PID=$!
-  echo -e "${DIM}Gateway PID: ${GATEWAY_PID}${RESET}"
-  sleep 1
+if [[ "$MICROWAVE_REVERSE_MODE" == "true" ]]; then
   microwave-node \
-    --gateway-url "http://${LAN_IP}:${GATEWAY_PORT}" \
-    --region "$REGION" \
-    --model "$MODEL" \
-    --host "$LAN_IP" \
-    --port "$NODE_PORT"
+    --gateway-url "$MICROWAVE_GATEWAY_URL" \
+    --region "$MICROWAVE_REGION" \
+    --model "$MICROWAVE_MODEL" \
+    --reverse
+else
+  microwave-node \
+    --gateway-url "$MICROWAVE_GATEWAY_URL" \
+    --region "$MICROWAVE_REGION" \
+    --model "$MICROWAVE_MODEL" \
+    --host "${MICROWAVE_NODE_IP:-$LAN_IP}" \
+    --port "${MICROWAVE_NODE_PORT:-9000}"
 fi

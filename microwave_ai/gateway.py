@@ -55,6 +55,7 @@ _health_task = None
 
 # WebSocket reverse-connected nodes
 _ws_connections: Dict[str, WebSocket] = {}
+_ws_locks: Dict[str, asyncio.Lock] = {}
 _task_queues: Dict[str, asyncio.Queue] = {}
 
 
@@ -68,10 +69,12 @@ async def _periodic_health_check() -> None:
             for node in list(nodes):
                 if node.is_ws:
                     ws = _ws_connections.get(node.node_id)
-                    if ws:
+                    lock = _ws_locks.get(node.node_id)
+                    if ws and lock:
                         try:
                             start = time.perf_counter()
-                            await ws.send_json({"type": "ping"})
+                            async with lock:
+                                await ws.send_json({"type": "ping"})
                             node.last_heartbeat = time.time()
                             node.last_latency_ms = (time.perf_counter() - start) * 1000.0
                         except Exception:
@@ -146,6 +149,7 @@ async def node_websocket(ws: WebSocket) -> None:
 
         _upsert_node(node_id, "ws-connected", 0, region, models, metadata, is_ws=True)
         _ws_connections[node_id] = ws
+        _ws_locks[node_id] = asyncio.Lock()
         print(f"[ws] Node connected: {node_id} (region={region}, models={models})")
         await ws.send_json({"type": "registered", "node_id": node_id})
 
@@ -175,6 +179,7 @@ async def node_websocket(ws: WebSocket) -> None:
     finally:
         if node_id:
             _ws_connections.pop(node_id, None)
+            _ws_locks.pop(node_id, None)
             nodes = deque(n for n in nodes if n.node_id != node_id)
             print(f"[ws] Node disconnected: {node_id}")
 
@@ -436,6 +441,18 @@ async def index() -> str:
             }
           }
         }
+        if (buffer.trim()) {
+          try {
+            const obj = JSON.parse(buffer);
+            if (typeof obj.response === 'string') {
+              fullText += obj.response;
+              botTextEl.textContent = fullText;
+            }
+          } catch (e) {
+            fullText += buffer;
+            botTextEl.textContent = fullText;
+          }
+        }
         statusEl.textContent = 'Done.';
       } catch (e) {
         statusEl.textContent = 'Error: ' + (e && e.message ? e.message : 'unknown');
@@ -468,110 +485,253 @@ async def chat_ui() -> str:
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Microwave AI</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Microwave AI Chat</title>
   <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg-0: #0a0b0f;
+      --bg-1: #131520;
+      --bg-2: #181b28;
+      --bg-3: #222738;
+      --panel: #161a26;
+      --text-0: #f8fafc;
+      --text-1: #d1d5db;
+      --text-2: #9ca3af;
+      --text-3: #6b7280;
+      --line: #2b3145;
+      --accent: #f97316;
+      --accent-soft: #fb923c;
+      --accent-glow: rgba(249, 115, 22, 0.35);
+      --good: #34d399;
+      --bad: #fb7185;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: #000;
-      color: #e5e7eb;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background:
+        radial-gradient(circle at 20% -20%, rgba(249, 115, 22, 0.25), transparent 40%),
+        radial-gradient(circle at 90% 20%, rgba(56, 189, 248, 0.12), transparent 35%),
+        var(--bg-0);
+      color: var(--text-0);
       height: 100vh;
       display: flex;
       overflow: hidden;
     }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
-    /* ── sidebar ── */
     #sidebar {
-      width: 220px;
-      min-width: 220px;
-      background: #111;
+      width: 250px;
+      min-width: 250px;
+      background: linear-gradient(180deg, #10131d, #0d1018);
       display: flex;
       flex-direction: column;
-      padding: 0.75rem 0.5rem;
-      border-right: 1px solid #1f1f1f;
-      gap: 0.25rem;
+      padding: 1rem 0.65rem 0.65rem;
+      border-right: 1px solid var(--line);
+      gap: 0.45rem;
     }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      padding: 0 0.45rem 0.35rem;
+    }
+    .brand-icon {
+      width: 30px;
+      height: 30px;
+      border-radius: 9px;
+      border: 1px solid rgba(251, 146, 60, 0.6);
+      background: linear-gradient(160deg, #2f364d, #171b2a);
+      display: grid;
+      place-items: center;
+      box-shadow: 0 0 16px rgba(251, 146, 60, 0.22);
+      font-size: 0.95rem;
+    }
+    .brand h1 { font-size: 0.9rem; line-height: 1.1; }
+    .brand p { font-size: 0.72rem; color: var(--text-2); line-height: 1.2; }
+
     #newChatBtn {
       display: flex;
       align-items: center;
       gap: 0.5rem;
-      padding: 0.5rem 0.6rem;
-      border-radius: 0.5rem;
+      padding: 0.62rem 0.7rem;
+      border-radius: 0.72rem;
       cursor: pointer;
-      font-size: 0.85rem;
-      color: #e5e7eb;
-      background: transparent;
-      border: none;
+      font-size: 0.84rem;
+      color: var(--text-0);
+      background: linear-gradient(135deg, rgba(249, 115, 22, 0.18), rgba(249, 115, 22, 0.08));
+      border: 1px solid rgba(251, 146, 60, 0.3);
       width: 100%;
       text-align: left;
     }
-    #newChatBtn:hover { background: #1f1f1f; }
+    #newChatBtn:hover {
+      border-color: rgba(251, 146, 60, 0.6);
+      box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
+    }
     #newChatBtn svg { flex-shrink: 0; }
+
     .history-label {
-      font-size: 0.68rem;
-      color: #6b7280;
+      font-size: 0.66rem;
+      color: var(--text-3);
       text-transform: uppercase;
-      letter-spacing: 0.07em;
-      padding: 0.5rem 0.6rem 0.2rem;
+      letter-spacing: 0.09em;
+      padding: 0.58rem 0.6rem 0.12rem;
     }
     .history-item {
-      padding: 0.4rem 0.6rem;
-      border-radius: 0.5rem;
+      padding: 0.5rem 0.62rem;
+      border-radius: 0.65rem;
       font-size: 0.82rem;
-      color: #9ca3af;
+      color: var(--text-2);
       cursor: pointer;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      border: 1px solid transparent;
     }
-    .history-item:hover { background: #1f1f1f; color: #e5e7eb; }
-    .history-item.active { background: #1f1f1f; color: #e5e7eb; }
+    .history-item:hover {
+      background: #171b27;
+      color: var(--text-0);
+      border-color: rgba(148, 163, 184, 0.2);
+    }
+    .history-item.active {
+      background: #202638;
+      color: var(--text-0);
+      border-color: rgba(251, 146, 60, 0.4);
+    }
+    #historyList {
+      overflow-y: auto;
+      padding-bottom: 0.3rem;
+    }
 
-    /* ── main chat area ── */
     #chatArea {
       flex: 1;
       display: flex;
       flex-direction: column;
       overflow: hidden;
     }
+    #topBar {
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(24, 27, 40, 0.94), rgba(24, 27, 40, 0.68));
+      padding: 0.7rem 1.2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.8rem;
+    }
+    .top-title {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.86rem;
+      color: var(--text-1);
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      display: inline-block;
+      box-shadow: 0 0 10px rgba(52, 211, 153, 0.45);
+      background: var(--good);
+    }
+    .pill-row { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+    .pill {
+      border: 1px solid var(--line);
+      background: rgba(19, 21, 32, 0.9);
+      color: var(--text-2);
+      border-radius: 999px;
+      padding: 0.2rem 0.52rem;
+      font-size: 0.71rem;
+    }
+    #activeModelTag { color: #fed7aa; border-color: rgba(251, 146, 60, 0.35); }
 
-    /* ── message list ── */
     #messages {
       flex: 1;
       overflow-y: auto;
-      padding: 2rem 0;
+      padding: 1.1rem 0 1.6rem;
       display: flex;
       flex-direction: column;
-      gap: 1.5rem;
+      gap: 1.1rem;
     }
-    #messages::-webkit-scrollbar { width: 4px; }
+    #messages::-webkit-scrollbar { width: 6px; }
     #messages::-webkit-scrollbar-track { background: transparent; }
-    #messages::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 4px; }
+    #messages::-webkit-scrollbar-thumb { background: #2d3447; border-radius: 6px; }
 
     .msg-row {
       display: flex;
       flex-direction: column;
-      padding: 0 10%;
+      padding: 0 9%;
     }
     .msg-row.user { align-items: flex-end; }
     .msg-row.bot  { align-items: flex-start; }
 
+    .meta {
+      margin-bottom: 0.28rem;
+      font-size: 0.68rem;
+      color: var(--text-3);
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .meta .who { color: var(--text-2); }
+
     .bubble {
-      max-width: 70%;
-      font-size: 0.9rem;
-      line-height: 1.55;
+      max-width: min(780px, 78%);
+      font-size: 0.92rem;
+      line-height: 1.58;
     }
     .msg-row.user .bubble {
-      background: #2a2a2a;
-      border-radius: 1.1rem 1.1rem 0.25rem 1.1rem;
-      padding: 0.6rem 0.9rem;
-      color: #e5e7eb;
+      background: linear-gradient(165deg, #343b53, #282d42);
+      border: 1px solid #3a4462;
+      border-radius: 1rem 1rem 0.22rem 1rem;
+      padding: 0.62rem 0.9rem;
+      color: #f8fafc;
     }
     .msg-row.bot .bubble {
-      background: transparent;
-      color: #e5e7eb;
+      background: linear-gradient(180deg, rgba(24, 28, 42, 0.72), rgba(24, 28, 42, 0.36));
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      border-radius: 0.9rem 0.9rem 0.9rem 0.24rem;
+      padding: 0.58rem 0.82rem;
+      color: #f1f5f9;
       white-space: pre-wrap;
     }
+
+    .bubble.loading {
+      border-color: rgba(251, 146, 60, 0.4);
+      background: linear-gradient(180deg, rgba(36, 29, 27, 0.95), rgba(34, 29, 29, 0.52));
+      color: #fdba74;
+    }
+    .heating-wrap {
+      display: flex;
+      align-items: center;
+      gap: 0.7rem;
+      min-width: 230px;
+    }
+    .microwave-loader {
+      width: 26px;
+      height: 26px;
+      border-radius: 8px;
+      border: 1px solid rgba(251, 146, 60, 0.7);
+      display: grid;
+      place-items: center;
+      position: relative;
+      background: rgba(18, 18, 24, 0.88);
+      color: #fb923c;
+    }
+    .microwave-loader::before,
+    .microwave-loader::after {
+      content: "";
+      position: absolute;
+      inset: -3px;
+      border-radius: 10px;
+      border: 1px solid rgba(251, 146, 60, 0.45);
+      opacity: 0;
+      animation: ping 1.5s ease-out infinite;
+    }
+    .microwave-loader::after { animation-delay: 0.45s; }
+    .heating-copy { display: flex; flex-direction: column; gap: 0.15rem; }
+    .heating-title { font-size: 0.8rem; color: #fed7aa; }
+    .heating-sub { font-size: 0.72rem; color: #cbd5e1; opacity: 0.86; }
+
     .msg-actions {
       margin-top: 0.3rem;
       display: flex;
@@ -579,141 +739,221 @@ async def chat_ui() -> str:
     }
     .action-btn {
       background: none;
-      border: none;
+      border: 1px solid transparent;
       cursor: pointer;
-      color: #6b7280;
-      padding: 0.2rem;
-      border-radius: 0.3rem;
+      color: var(--text-3);
+      padding: 0.24rem;
+      border-radius: 0.44rem;
       display: flex;
       align-items: center;
     }
-    .action-btn:hover { color: #e5e7eb; background: #1f1f1f; }
+    .action-btn:hover {
+      color: #f8fafc;
+      background: #1d2232;
+      border-color: #30374d;
+    }
     .action-btn svg { width: 14px; height: 14px; }
 
-    /* ── empty state ── */
     #emptyState {
       flex: 1;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 0.5rem;
-      color: #6b7280;
+      gap: 0.62rem;
+      color: var(--text-2);
       font-size: 0.95rem;
-      padding-bottom: 4rem;
+      padding: 0.8rem 1rem 4rem;
+      text-align: center;
     }
-    #emptyState .big { font-size: 2rem; }
+    #emptyState .big {
+      font-size: 2.05rem;
+      filter: drop-shadow(0 0 20px rgba(249, 115, 22, 0.28));
+    }
+    #suggestions {
+      margin-top: 0.8rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      justify-content: center;
+      max-width: 700px;
+    }
+    .suggestion {
+      border: 1px solid #38405b;
+      background: #1b2030;
+      color: #cbd5e1;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      padding: 0.38rem 0.72rem;
+      cursor: pointer;
+    }
+    .suggestion:hover {
+      border-color: rgba(251, 146, 60, 0.6);
+      color: #fff7ed;
+      box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
+    }
 
-    /* ── input area ── */
     #inputArea {
-      padding: 0.75rem 10% 1.25rem;
+      padding: 0.65rem 9% 1.1rem;
     }
     #inputShell {
-      background: #1a1a1a;
-      border-radius: 1rem;
-      padding: 0.6rem 0.6rem 0.6rem 1rem;
+      background: linear-gradient(180deg, rgba(24, 28, 41, 0.95), rgba(20, 23, 34, 0.95));
+      border-radius: 1.05rem;
+      padding: 0.68rem 0.68rem 0.62rem 0.95rem;
       display: flex;
       flex-direction: column;
       gap: 0.5rem;
-      border: 1px solid #2a2a2a;
+      border: 1px solid #353f5c;
+      box-shadow: 0 15px 40px rgba(0, 0, 0, 0.25);
     }
     #promptInput {
       background: transparent;
       border: none;
       outline: none;
-      color: #e5e7eb;
-      font-size: 0.9rem;
+      color: #f8fafc;
+      font-size: 0.92rem;
       resize: none;
       min-height: 24px;
       max-height: 160px;
       overflow-y: auto;
       line-height: 1.5;
     }
-    #promptInput::placeholder { color: #4b5563; }
+    #promptInput::placeholder { color: #76809c; }
     .input-footer {
       display: flex;
       align-items: center;
       justify-content: space-between;
     }
     .input-left { display: flex; gap: 0.4rem; align-items: center; }
-    .icon-btn {
-      background: none;
-      border: none;
-      cursor: pointer;
-      color: #6b7280;
-      padding: 0.25rem;
-      border-radius: 0.4rem;
-      display: flex;
-      align-items: center;
-    }
-    .icon-btn:hover { color: #e5e7eb; background: #2a2a2a; }
     .model-select {
-      background: #2a2a2a;
-      border: none;
-      color: #9ca3af;
+      background: #23293b;
+      border: 1px solid #36405a;
+      color: #d1d5db;
       font-size: 0.75rem;
-      padding: 0.2rem 0.5rem;
-      border-radius: 0.4rem;
+      padding: 0.27rem 0.55rem;
+      border-radius: 0.44rem;
       cursor: pointer;
       outline: none;
     }
-    .model-select:focus { outline: none; }
+    .model-select:hover { border-color: #4a5675; }
+    .model-select:focus { border-color: #7c8ab1; }
+    #statusText {
+      color: var(--text-3);
+      font-size: 0.72rem;
+      min-height: 1.1em;
+    }
     #sendBtn {
-      width: 32px;
-      height: 32px;
+      min-width: 36px;
+      height: 36px;
+      padding: 0 0.66rem;
       border-radius: 50%;
-      background: #e5e7eb;
-      border: none;
+      background: linear-gradient(170deg, #fb923c, #f97316);
+      border: 1px solid rgba(254, 215, 170, 0.45);
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
       flex-shrink: 0;
+      box-shadow: 0 0 18px var(--accent-glow);
+      color: #1f130f;
     }
-    #sendBtn:disabled { opacity: 0.3; cursor: default; }
-    #sendBtn svg { color: #000; }
+    #sendBtn:disabled {
+      opacity: 0.45;
+      cursor: default;
+      box-shadow: none;
+      filter: grayscale(0.35);
+    }
+    #sendBtn svg { color: #1a0f0a; }
+    #sendBtn.sending {
+      animation: warmPulse 1.3s ease-in-out infinite;
+    }
+
+    .error-pill {
+      color: #fecdd3;
+      background: rgba(127, 29, 29, 0.35);
+      border: 1px solid rgba(251, 113, 133, 0.45);
+      border-radius: 999px;
+      padding: 0.15rem 0.5rem;
+      font-size: 0.71rem;
+    }
+
+    @keyframes ping {
+      0% { transform: scale(0.95); opacity: 0.65; }
+      70% { transform: scale(1.35); opacity: 0; }
+      100% { transform: scale(1.35); opacity: 0; }
+    }
+    @keyframes warmPulse {
+      0%, 100% { box-shadow: 0 0 12px rgba(249, 115, 22, 0.28); }
+      50% { box-shadow: 0 0 24px rgba(249, 115, 22, 0.5); }
+    }
+
+    @media (max-width: 920px) {
+      #sidebar { display: none; }
+      .msg-row { padding: 0 5%; }
+      #inputArea { padding: 0.65rem 5% 1rem; }
+      .bubble { max-width: 92%; }
+      #topBar { padding: 0.65rem 0.8rem; }
+    }
   </style>
 </head>
 <body>
-
-  <!-- Sidebar -->
   <div id="sidebar">
+    <div class="brand">
+      <div class="brand-icon">▣</div>
+      <div>
+        <h1>Microwave AI</h1>
+        <p>Heat up distributed inference</p>
+      </div>
+    </div>
     <button id="newChatBtn">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M12 5v14M5 12h14"/>
       </svg>
-      New Chat
+      New Chat Session
     </button>
     <div class="history-label">Today</div>
     <div id="historyList"></div>
   </div>
 
-  <!-- Main -->
   <div id="chatArea">
+    <div id="topBar">
+      <div class="top-title">
+        <span class="dot"></span>
+        <span>Microwave chat ready</span>
+      </div>
+      <div class="pill-row">
+        <span class="pill mono">POST /chat</span>
+        <span class="pill mono">region LAN</span>
+        <span class="pill mono" id="activeModelTag">model llama3.2</span>
+      </div>
+    </div>
+
     <div id="messages">
       <div id="emptyState">
-        <div class="big">⚡</div>
-        <div>Ask Microwave AI anything</div>
-        <div style="font-size:0.75rem;color:#374151;">Running on your local network</div>
+        <div class="big">📡</div>
+        <div>What should we heat up?</div>
+        <div style="font-size:0.78rem;color:#73809f;">Microwave routes your request to a live node and streams tokens back in real-time.</div>
+        <div id="suggestions">
+          <button class="suggestion">Explain how Microwave AI routing works</button>
+          <button class="suggestion">Write a healthy microwave mug cake recipe</button>
+          <button class="suggestion">Summarize this project in 5 bullets</button>
+          <button class="suggestion">Generate Python code for a websocket client</button>
+        </div>
       </div>
     </div>
 
     <div id="inputArea">
       <div id="inputShell">
-        <textarea id="promptInput" rows="1" placeholder="Send a message"></textarea>
+        <textarea id="promptInput" rows="1" placeholder="Ask Microwave AI anything..."></textarea>
         <div class="input-footer">
           <div class="input-left">
-            <button class="icon-btn" title="Attach" disabled>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/>
-              </svg>
-            </button>
             <select id="modelSelect" class="model-select">
               <option value="llama3.2">llama3.2</option>
               <option value="llama3">llama3</option>
               <option value="phi3">phi3</option>
               <option value="deepseek-coder:6.7b">deepseek-coder</option>
             </select>
+            <span id="statusText"></span>
           </div>
           <button id="sendBtn" disabled>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
@@ -726,15 +966,19 @@ async def chat_ui() -> str:
   </div>
 
 <script>
-  const messagesEl  = document.getElementById('messages');
-  const emptyState  = document.getElementById('emptyState');
-  const promptEl    = document.getElementById('promptInput');
-  const sendBtn     = document.getElementById('sendBtn');
+  const messagesEl = document.getElementById('messages');
+  const emptyState = document.getElementById('emptyState');
+  const promptEl = document.getElementById('promptInput');
+  const sendBtn = document.getElementById('sendBtn');
   const modelSelect = document.getElementById('modelSelect');
   const historyList = document.getElementById('historyList');
+  const statusText = document.getElementById('statusText');
+  const activeModelTag = document.getElementById('activeModelTag');
+  const suggestionButtons = Array.from(document.querySelectorAll('.suggestion'));
 
-  let sessions = [];       // [{title, messages:[]}]
+  let sessions = []; // [{title, messages:[{role,text,model,time}]}]
   let activeIdx = -1;
+  let isSending = false;
 
   function newSession() {
     const s = { title: null, messages: [] };
@@ -750,7 +994,11 @@ async def chat_ui() -> str:
       const d = document.createElement('div');
       d.className = 'history-item' + (i === activeIdx ? ' active' : '');
       d.textContent = s.title || 'New conversation';
-      d.onclick = () => { activeIdx = i; renderHistory(); renderMessages(); };
+      d.onclick = () => {
+        activeIdx = i;
+        renderHistory();
+        renderMessages();
+      };
       historyList.appendChild(d);
     });
   }
@@ -763,19 +1011,42 @@ async def chat_ui() -> str:
       return;
     }
     messagesEl.innerHTML = '';
-    s.messages.forEach(m => appendBubble(m.role, m.text));
+    s.messages.forEach(m => appendBubble(m.role, m.text, { model: m.model, time: m.time }));
   }
 
-  function appendBubble(role, text, streaming) {
+  function nowStamp() {
+    const d = new Date();
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function escapeHtml(text) {
+    return (text || '').replace(/[&<>"']/g, ch => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[ch]));
+  }
+
+  function appendBubble(role, text, opts = {}) {
     const row = document.createElement('div');
     row.className = 'msg-row ' + role;
+
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const who = role === 'user' ? 'You' : 'Microwave AI';
+    const model = opts.model ? ' · ' + opts.model : '';
+    const time = opts.time || nowStamp();
+    meta.innerHTML = `<span class="who">${who}${model}</span><span>${time}</span>`;
+    row.appendChild(meta);
 
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.textContent = text;
     row.appendChild(bubble);
 
-    if (!streaming) {
+    if (!opts.streaming) {
       const actions = document.createElement('div');
       actions.className = 'msg-actions';
       const copyBtn = document.createElement('button');
@@ -784,18 +1055,43 @@ async def chat_ui() -> str:
       copyBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
       </svg>`;
-      copyBtn.onclick = () => navigator.clipboard.writeText(text).catch(() => {});
+      copyBtn.onclick = () => navigator.clipboard.writeText(text || '').catch(() => {});
       actions.appendChild(copyBtn);
       row.appendChild(actions);
     }
 
     messagesEl.appendChild(row);
     messagesEl.scrollTop = messagesEl.scrollHeight;
-    return bubble;
+    return { row, bubble };
+  }
+
+  function createLoadingBubble() {
+    const { row, bubble } = appendBubble('bot', '', { streaming: true, model: modelSelect.value });
+    bubble.classList.add('loading');
+    bubble.innerHTML = `
+      <div class="heating-wrap">
+        <div class="microwave-loader">~</div>
+        <div class="heating-copy">
+          <div class="heating-title">Heating response...</div>
+          <div class="heating-sub">Microwave is routing and streaming</div>
+        </div>
+      </div>
+    `;
+    return { row, bubble };
   }
 
   function updateSendBtn() {
-    sendBtn.disabled = promptEl.value.trim().length === 0;
+    sendBtn.disabled = isSending || promptEl.value.trim().length === 0;
+  }
+
+  function setStatus(text, isError) {
+    if (!text) {
+      statusText.textContent = '';
+      statusText.className = '';
+      return;
+    }
+    statusText.textContent = text;
+    statusText.className = isError ? 'error-pill' : '';
   }
 
   promptEl.addEventListener('input', () => {
@@ -805,35 +1101,54 @@ async def chat_ui() -> str:
   });
 
   promptEl.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      doSend();
+    }
   });
 
   sendBtn.addEventListener('click', doSend);
+  modelSelect.addEventListener('change', () => {
+    activeModelTag.textContent = 'model ' + modelSelect.value;
+  });
+
+  suggestionButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      promptEl.value = btn.textContent;
+      promptEl.dispatchEvent(new Event('input'));
+      promptEl.focus();
+    });
+  });
 
   async function doSend() {
     const prompt = promptEl.value.trim();
-    if (!prompt || sendBtn.disabled) return;
+    if (!prompt || sendBtn.disabled || isSending) return;
 
     if (activeIdx === -1 || sessions.length === 0) newSession();
 
     const s = sessions[activeIdx];
-    s.messages.push({ role: 'user', text: prompt });
+    const sentAt = nowStamp();
+    s.messages.push({ role: 'user', text: prompt, model: null, time: sentAt });
     if (!s.title) {
       s.title = prompt.slice(0, 32) + (prompt.length > 32 ? '…' : '');
       renderHistory();
     }
 
-    // remove empty state, add user bubble
     if (messagesEl.contains(emptyState)) messagesEl.removeChild(emptyState);
-    appendBubble('user', prompt, false);
+    appendBubble('user', prompt, { time: sentAt });
 
     promptEl.value = '';
     promptEl.style.height = 'auto';
-    sendBtn.disabled = true;
+    isSending = true;
+    sendBtn.classList.add('sending');
+    setStatus('Heating...');
+    updateSendBtn();
 
-    // streaming bot bubble
-    const botBubble = appendBubble('bot', '', true);
+    const loading = createLoadingBubble();
+    const botBubble = loading.bubble;
+    const botRow = loading.row;
     let fullText = '';
+    let convertedFromLoading = false;
 
     try {
       const res = await fetch('/chat', {
@@ -843,7 +1158,12 @@ async def chat_ui() -> str:
       });
 
       if (!res.ok || !res.body) {
-        botBubble.textContent = 'Error: ' + res.status;
+        const detail = res.status === 503
+          ? 'No active nodes. Start or connect a node first.'
+          : 'Request failed with status ' + res.status;
+        botBubble.classList.remove('loading');
+        botBubble.textContent = detail;
+        setStatus(detail, true);
         return;
       }
 
@@ -864,11 +1184,21 @@ async def chat_ui() -> str:
             try {
               const obj = JSON.parse(line);
               if (typeof obj.response === 'string') {
+                if (!convertedFromLoading) {
+                  convertedFromLoading = true;
+                  botBubble.classList.remove('loading');
+                  botBubble.textContent = '';
+                }
                 fullText += obj.response;
                 botBubble.textContent = fullText;
                 messagesEl.scrollTop = messagesEl.scrollHeight;
               }
             } catch (_) {
+              if (!convertedFromLoading) {
+                convertedFromLoading = true;
+                botBubble.classList.remove('loading');
+                botBubble.textContent = '';
+              }
               fullText += line;
               botBubble.textContent = fullText;
             }
@@ -876,8 +1206,11 @@ async def chat_ui() -> str:
         }
       }
 
-      // add copy button after streaming done
-      const row = botBubble.parentElement;
+      if (!convertedFromLoading && !fullText) {
+        botBubble.classList.remove('loading');
+        botBubble.textContent = 'No response received from node.';
+      }
+
       const actions = document.createElement('div');
       actions.className = 'msg-actions';
       const copyBtn = document.createElement('button');
@@ -888,13 +1221,23 @@ async def chat_ui() -> str:
       </svg>`;
       copyBtn.onclick = () => navigator.clipboard.writeText(fullText).catch(() => {});
       actions.appendChild(copyBtn);
-      row.appendChild(actions);
+      botRow.appendChild(actions);
 
-      s.messages.push({ role: 'bot', text: fullText });
+      s.messages.push({
+        role: 'bot',
+        text: fullText || botBubble.textContent,
+        model: modelSelect.value,
+        time: nowStamp()
+      });
+      setStatus('Served by Microwave network');
     } catch (e) {
+      botBubble.classList.remove('loading');
       botBubble.textContent = 'Error: ' + (e && e.message ? e.message : 'unknown');
+      setStatus('Stream error. Please retry.', true);
     } finally {
-      sendBtn.disabled = false;
+      isSending = false;
+      sendBtn.classList.remove('sending');
+      updateSendBtn();
       promptEl.focus();
     }
   }
@@ -906,6 +1249,7 @@ async def chat_ui() -> str:
 
   // Start with a fresh session
   newSession();
+  activeModelTag.textContent = 'model ' + modelSelect.value;
   promptEl.focus();
 </script>
 </body>
@@ -974,17 +1318,26 @@ def _chat_via_http(node: NodeInfo, prompt: str, model: Optional[str]) -> Streami
 
 
 async def _chat_via_ws(node: NodeInfo, prompt: str, model: Optional[str]) -> StreamingResponse:
-    ws = _ws_connections[node.node_id]
+    ws = _ws_connections.get(node.node_id)
+    lock = _ws_locks.get(node.node_id)
+    if not ws or not lock:
+        raise HTTPException(status_code=503, detail="Node disconnected")
+
     task_id = uuid.uuid4().hex
     queue: asyncio.Queue = asyncio.Queue()
     _task_queues[task_id] = queue
 
-    await ws.send_json({
-        "type": "task",
-        "task_id": task_id,
-        "prompt": prompt,
-        "model": model or "",
-    })
+    try:
+        async with lock:
+            await ws.send_json({
+                "type": "task",
+                "task_id": task_id,
+                "prompt": prompt,
+                "model": model or "",
+            })
+    except Exception:
+        _task_queues.pop(task_id, None)
+        raise HTTPException(status_code=503, detail="Failed to reach node")
 
     async def stream_from_ws():
         try:
@@ -1010,10 +1363,12 @@ async def health_check_nodes() -> JSONResponse:
         for node in list(nodes):
             if node.is_ws:
                 ws = _ws_connections.get(node.node_id)
-                if ws:
+                lock = _ws_locks.get(node.node_id)
+                if ws and lock:
                     try:
                         start = time.perf_counter()
-                        await ws.send_json({"type": "ping"})
+                        async with lock:
+                            await ws.send_json({"type": "ping"})
                         node.last_heartbeat = time.time()
                         node.last_latency_ms = (time.perf_counter() - start) * 1000.0
                     except Exception:

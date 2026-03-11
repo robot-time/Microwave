@@ -2,11 +2,12 @@
 set -e
 
 # ─────────────────────────────────────────────
-#  Microwave AI – interactive setup
+#  Microwave AI – one-command setup
 # ─────────────────────────────────────────────
 
 REPO_URL="https://github.com/robot-time/Microwave.git"
 REPO_DIR="Microwave"
+CONFIG_FILE=".microwave.env"
 
 # ── find python binary ───────────────────────
 PYTHON=""
@@ -31,8 +32,6 @@ DIM="\033[2m"
 RESET="\033[0m"
 
 # ── are we already inside the repo? ──────────
-# If pyproject.toml exists here, we're already in the repo – just pull.
-# Otherwise clone/pull into a subdirectory, then re-exec from the new copy.
 if [ ! -f "pyproject.toml" ]; then
   if [ -d "$REPO_DIR/.git" ]; then
     echo "Updating repo ..."
@@ -42,11 +41,10 @@ if [ ! -f "pyproject.toml" ]; then
     git clone "$REPO_URL" "$REPO_DIR"
   fi
   cd "$REPO_DIR"
-  # Re-exec the UPDATED setup.sh so all fixes take effect
   exec bash setup.sh
 fi
 
-# ── From here on, we are definitely inside the repo ──
+# ── From here on, we are inside the repo ─────
 
 clear
 
@@ -63,17 +61,15 @@ cat << 'EOF'
 EOF
 
 echo -e "${BOLD}Microwave Network${RESET} – decentralised AI inference"
-echo -e "${DIM}BitTorrent for AI  ·  github.com/robot-time/Microwave${RESET}"
+echo -e "${DIM}github.com/robot-time/Microwave${RESET}"
 echo ""
 
-# ── detect LAN IP ─────────────────────────────
+# ── detect LAN IP ────────────────────────────
 detect_ip() {
   local ip=""
-  # Linux: ip route
   if [ -z "$ip" ] && command -v ip >/dev/null 2>&1; then
     ip=$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ { print $7; exit }')
   fi
-  # macOS: ipconfig getifaddr (skip on Windows where ipconfig is a different tool)
   if [ -z "$ip" ]; then
     local maybe_mac
     maybe_mac=$(ipconfig getifaddr en0 2>/dev/null || true)
@@ -84,11 +80,9 @@ detect_ip() {
     maybe_mac=$(ipconfig getifaddr en1 2>/dev/null || true)
     [ -n "$maybe_mac" ] && ip="$maybe_mac"
   fi
-  # Windows (Git Bash / MINGW): parse ipconfig.exe for IPv4
   if [ -z "$ip" ] && command -v ipconfig.exe >/dev/null 2>&1; then
     ip=$(ipconfig.exe 2>/dev/null | grep -i "IPv4" | head -1 | sed 's/.*: //' | tr -d '\r' || true)
   fi
-  # Fallback: hostname -I (Linux)
   if [ -z "$ip" ] && command -v hostname >/dev/null 2>&1; then
     ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
   fi
@@ -96,162 +90,45 @@ detect_ip() {
 }
 
 NODE_IP=$(detect_ip)
-WAN_IP=""
-TAILSCALE_FUNNEL_URL="https://electricity-guzzler.tail7917c7.ts.net"
-
-detect_wan_ip() {
-  local wan=""
-  if command -v curl >/dev/null 2>&1; then
-    wan=$(curl -fsS --max-time 3 https://api.ipify.org 2>/dev/null || true)
-  fi
-  if [ -z "$wan" ] && command -v wget >/dev/null 2>&1; then
-    wan=$(wget -qO- --timeout=3 https://api.ipify.org 2>/dev/null || true)
-  fi
-  echo "$wan"
-}
-
-detect_tailscale_funnel_url() {
-  local url=""
-  if command -v tailscale >/dev/null 2>&1; then
-    url=$(tailscale funnel status 2>/dev/null | awk '/https:\/\//{print $1; exit}' || true)
-  fi
-  echo "$url"
-}
-
-enable_tailscale_funnel() {
-  # Auto-enable Funnel so non-Tailscale clients can connect.
-  if ! command -v tailscale >/dev/null 2>&1; then
-    return
-  fi
-
-  echo -e "${BOLD}── Tailscale Funnel (auto) ─────────────────${RESET}"
-  echo "  Attempting to expose gateway via Tailscale Funnel ..."
-
-  local serve_ok=false
-  local funnel_ok=false
-
-  if tailscale serve --bg --tcp "$GATEWAY_PORT" "127.0.0.1:${GATEWAY_PORT}" >/dev/null 2>&1; then
-    serve_ok=true
-  elif command -v sudo >/dev/null 2>&1 && sudo tailscale serve --bg --tcp "$GATEWAY_PORT" "127.0.0.1:${GATEWAY_PORT}" >/dev/null 2>&1; then
-    serve_ok=true
-  fi
-
-  if tailscale funnel --bg "$GATEWAY_PORT" >/dev/null 2>&1; then
-    funnel_ok=true
-  elif command -v sudo >/dev/null 2>&1 && sudo tailscale funnel --bg "$GATEWAY_PORT" >/dev/null 2>&1; then
-    funnel_ok=true
-  fi
-
-  TAILSCALE_FUNNEL_URL="$(detect_tailscale_funnel_url)"
-  if [[ "$serve_ok" == true && "$funnel_ok" == true && -n "$TAILSCALE_FUNNEL_URL" ]]; then
-    echo -e "  ${GREEN}Funnel enabled:${RESET} ${CYAN}${TAILSCALE_FUNNEL_URL}${RESET}"
-  else
-    echo -e "  ${YELLOW}Could not auto-enable Funnel.${RESET}"
-    echo "  If needed, run manually on gateway:"
-    echo "    sudo tailscale serve --bg --tcp ${GATEWAY_PORT} 127.0.0.1:${GATEWAY_PORT}"
-    echo "    sudo tailscale funnel --bg ${GATEWAY_PORT}"
-  fi
-  echo ""
-}
-
 if [ -z "$NODE_IP" ]; then
   echo -e "${RED}Could not auto-detect your LAN IP.${RESET}"
-  read -rp "  Enter this machine's LAN IP manually: " NODE_IP
+  read -rp "  Enter this machine's LAN IP: " NODE_IP
 fi
 
-echo -e "  Detected LAN IP: ${CYAN}${NODE_IP}${RESET}"
-echo ""
-
-# ── fixed node mode ───────────────────────────
-# Gateway is no longer prompted. This script is node-only and defaults to reverse mode.
+# ── defaults (node, reverse mode, llama3.2) ──
 ROLE="2"
 REVERSE_MODE=true
 GATEWAY_PORT=8000
-DEFAULT_GATEWAY_URL="${MICROWAVE_GATEWAY_URL:-https://electricity-guzzler.tail7917c7.ts.net}"
-GATEWAY_URL="$DEFAULT_GATEWAY_URL"
-echo -e "${BOLD}Mode:${RESET} Node (reverse/WebSocket)"
-echo -e "  Gateway: ${CYAN}${GATEWAY_URL}${RESET}"
-echo ""
-
-# ── node config ───────────────────────────────
 NODE_PORT=9000
 MODEL="llama3.2"
-if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
-  if [[ "$REVERSE_MODE" == false ]]; then
-    read -rp "  Node port [${NODE_PORT}]: " _nport
-    [ -n "$_nport" ] && NODE_PORT="$_nport"
-  fi
-
-  echo ""
-  echo -e "  ${BOLD}Which model should this node serve?${RESET}"
-  echo -e "  ${DIM}(must be pulled in Ollama on this machine)${RESET}"
-  echo ""
-  echo -e "  ${CYAN}1)${RESET} llama3.2    ${DIM}(small, fast, general)${RESET}"
-  echo -e "  ${CYAN}2)${RESET} llama3      ${DIM}(larger general model)${RESET}"
-  echo -e "  ${CYAN}3)${RESET} phi3        ${DIM}(tiny, very fast)${RESET}"
-  echo -e "  ${CYAN}4)${RESET} deepseek-coder:6.7b  ${DIM}(coding specialist)${RESET}"
-  echo -e "  ${CYAN}5)${RESET} Custom      ${DIM}(type your own)${RESET}"
-  echo ""
-  read -rp "  Enter 1-5 [1]: " _mchoice
-  case "$_mchoice" in
-    2) MODEL="llama3" ;;
-    3) MODEL="phi3" ;;
-    4) MODEL="deepseek-coder:6.7b" ;;
-    5) read -rp "  Model name: " MODEL ;;
-    *) MODEL="llama3.2" ;;
-  esac
-  echo ""
-fi
-
-# ── region ────────────────────────────────────
 REGION="LAN"
-if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
-  read -rp "  Region tag [LAN]: " _region
-  [ -n "$_region" ] && REGION="$_region"
-  echo ""
-fi
+GATEWAY_URL="${MICROWAVE_GATEWAY_URL:-https://electricity-guzzler.tail7917c7.ts.net}"
 
-# ── summary ───────────────────────────────────
-echo -e "${BOLD}── Setup summary ──────────────────────────${RESET}"
-if [[ "$ROLE" == "1" || "$ROLE" == "3" ]]; then
-  echo -e "  Role:        ${CYAN}Gateway${RESET}"
-  echo -e "  Gateway URL: ${CYAN}http://${NODE_IP}:${GATEWAY_PORT}${RESET}"
-  if [ -n "$WAN_IP" ]; then
-    echo -e "  WAN URL:     ${CYAN}http://${WAN_IP}:${GATEWAY_PORT}${RESET}"
-  fi
-  if [ -n "$TAILSCALE_FUNNEL_URL" ]; then
-    echo -e "  Funnel URL:  ${CYAN}${TAILSCALE_FUNNEL_URL}${RESET}"
-  else
-    echo -e "  Funnel URL:  ${DIM}(will auto-configure if tailscale is available)${RESET}"
-  fi
-  echo -e "  Control:     ${CYAN}http://${NODE_IP}:${GATEWAY_PORT}/${RESET}"
-  echo -e "  Chat UI:     ${CYAN}http://${NODE_IP}:${GATEWAY_PORT}/chat-ui${RESET}"
-fi
-if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
-  echo -e "  Role:        ${CYAN}Node${RESET}"
-  if [[ "$REVERSE_MODE" == true ]]; then
-    echo -e "  Connection:  ${CYAN}Reverse (WebSocket)${RESET}"
-  else
-    echo -e "  Node IP:     ${CYAN}${NODE_IP}:${NODE_PORT}${RESET}"
-  fi
-  echo -e "  Gateway:     ${CYAN}${GATEWAY_URL}${RESET}"
-  echo -e "  Model:       ${CYAN}${MODEL}${RESET}"
-  echo -e "  Region:      ${CYAN}${REGION}${RESET}"
-fi
-echo ""
-read -rp "  Looks good? Start setup (y/n) [y]: " _confirm
-[[ "$_confirm" == "n" || "$_confirm" == "N" ]] && echo "Aborted." && exit 0
+echo -e "  LAN IP:  ${CYAN}${NODE_IP}${RESET}"
+echo -e "  Mode:    ${CYAN}Node (reverse WebSocket)${RESET}"
+echo -e "  Gateway: ${CYAN}${GATEWAY_URL}${RESET}"
+echo -e "  Model:   ${CYAN}${MODEL}${RESET}"
 echo ""
 
-# ── pull latest (we're already in the repo) ──
-echo -e "${BOLD}── Pulling latest code ─────────────────────${RESET}"
+# ── persist config for run.sh ────────────────
+cat > "$CONFIG_FILE" <<EOF
+MICROWAVE_ROLE="$ROLE"
+MICROWAVE_GATEWAY_URL="$GATEWAY_URL"
+MICROWAVE_GATEWAY_PORT="$GATEWAY_PORT"
+MICROWAVE_NODE_IP="$NODE_IP"
+MICROWAVE_NODE_PORT="$NODE_PORT"
+MICROWAVE_REGION="$REGION"
+MICROWAVE_MODEL="$MODEL"
+MICROWAVE_REVERSE_MODE="$REVERSE_MODE"
+EOF
+
+# ── pull latest ──────────────────────────────
+echo -e "${BOLD}[1/3] Pulling latest code${RESET}"
 git pull --ff-only 2>/dev/null || true
 echo ""
 
-# ── python venv ───────────────────────────────
-# We skip 'source activate' entirely – just prepend the venv dir to PATH.
-# This works identically on Windows (Scripts/) and Unix (bin/).
-echo -e "${BOLD}── Python environment ──────────────────────${RESET}"
+# ── python venv + install ────────────────────
+echo -e "${BOLD}[2/3] Python environment${RESET}"
 if [ ! -d ".venv" ]; then
   echo "  Creating .venv ..."
   $PYTHON -m venv .venv
@@ -265,124 +142,58 @@ elif [ -d ".venv/bin" ]; then
 fi
 
 if [ -z "$VENV_BIN" ]; then
-  echo -e "  ${RED}venv created but Scripts/ and bin/ are both missing.${RESET}"
-  echo "  Try deleting .venv and re-running:  rm -rf .venv && bash setup.sh"
+  echo -e "  ${RED}venv created but bin dir missing.${RESET}"
+  echo "  Try: rm -rf .venv && bash setup.sh"
   exit 1
 fi
 
 export PATH="$VENV_BIN:$PATH"
-echo "  venv active ($VENV_BIN)"
-
-echo "  Installing microwave-ai ..."
 pip install --upgrade pip >/dev/null 2>&1 || true
 pip install -e . >/dev/null 2>&1 || {
-  echo -e "  ${YELLOW}pip install -e . had issues, retrying ...${RESET}"
+  echo -e "  ${YELLOW}Retrying pip install ...${RESET}"
   pip install -e . 2>&1 || true
 }
 echo -e "  ${GREEN}Done.${RESET}"
 echo ""
 
-# ── ollama check (node) ───────────────────────
-if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
-  echo -e "${BOLD}── Ollama check ────────────────────────────${RESET}"
-  if ! command -v ollama >/dev/null 2>&1; then
-    echo -e "  ${YELLOW}Ollama is not installed (or not in PATH).${RESET}"
-    echo "  Trying automatic install ..."
+# ── ollama check + model pull ────────────────
+echo -e "${BOLD}[3/3] Ollama + model${RESET}"
+if ! command -v ollama >/dev/null 2>&1; then
+  echo -e "  ${YELLOW}Ollama not found.${RESET} Installing ..."
 
-    if command -v ipconfig.exe >/dev/null 2>&1; then
-      echo "  Windows detected."
-      echo "  Please open PowerShell and run:"
-      echo "    irm https://ollama.com/install.ps1 | iex"
-      echo "  Then come back here and press Enter."
-      read -rp "  Press Enter once Ollama is installed... " _
+  if command -v ipconfig.exe >/dev/null 2>&1; then
+    echo "  Windows: open PowerShell and run:"
+    echo "    irm https://ollama.com/install.ps1 | iex"
+    read -rp "  Press Enter once Ollama is installed... " _
+  else
+    if bash -c "curl -fsSL https://ollama.com/install.sh | sh"; then
+      echo -e "  ${GREEN}Ollama installed.${RESET}"
     else
-      # macOS + Linux installer
-      if bash -c "curl -fsSL https://ollama.com/install.sh | sh"; then
-        echo -e "  ${GREEN}Ollama install command completed.${RESET}"
-      else
-        echo -e "  ${YELLOW}Auto-install failed.${RESET}"
-        echo "  Please run this manually and then come back:"
-        echo "    curl -fsSL https://ollama.com/install.sh | sh"
-        read -rp "  Press Enter once Ollama is installed... " _
-      fi
+      echo -e "  ${YELLOW}Auto-install failed.${RESET} Run manually:"
+      echo "    curl -fsSL https://ollama.com/install.sh | sh"
+      read -rp "  Press Enter once Ollama is installed... " _
     fi
   fi
-
-  # Final verification loop to ensure ollama is actually available
-  while ! command -v ollama >/dev/null 2>&1; do
-    echo -e "  ${RED}Ollama still not found in PATH.${RESET}"
-    echo "  Install it, restart your terminal, then press Enter to retry."
-    read -rp "  Press Enter to re-check (or Ctrl+C to quit)... " _
-  done
-
-  echo "  Checking if '${MODEL}' is available locally ..."
-  if ! ollama list 2>/dev/null | grep -q "$MODEL"; then
-    echo "  Model '${MODEL}' not found. Pulling now (this may take a while) ..."
-    ollama pull "$MODEL"
-  else
-    echo -e "  ${GREEN}Model '${MODEL}' already present.${RESET}"
-  fi
-  echo ""
 fi
 
-# ── Windows firewall hint (only for direct HTTP mode) ──
-if command -v ipconfig.exe >/dev/null 2>&1; then
-  if [[ ("$ROLE" == "2" || "$ROLE" == "3") && "$REVERSE_MODE" == false ]]; then
-    echo -e "${YELLOW}── Windows Firewall ────────────────────────${RESET}"
-    echo -e "  The gateway needs to reach this node on port ${CYAN}${NODE_PORT}${RESET}."
-    echo -e "  If health checks fail, allow the port through the firewall:"
-    echo -e "  ${DIM}  (Run in an Admin PowerShell)${RESET}"
-    echo -e "  ${CYAN}netsh advfirewall firewall add rule name=\"Microwave Node\" dir=in action=allow protocol=TCP localport=${NODE_PORT}${RESET}"
-    echo ""
-  fi
-fi
+while ! command -v ollama >/dev/null 2>&1; do
+  echo -e "  ${RED}Ollama still not in PATH.${RESET}"
+  read -rp "  Press Enter to retry (or Ctrl+C to quit)... " _
+done
 
-# ── start services ────────────────────────────
-echo -e "${BOLD}── Starting Microwave AI ───────────────────${RESET}"
+if ! ollama list 2>/dev/null | grep -q "$MODEL"; then
+  echo "  Pulling '${MODEL}' (first time only) ..."
+  ollama pull "$MODEL"
+else
+  echo -e "  ${GREEN}'${MODEL}' ready.${RESET}"
+fi
 echo ""
 
-if [[ "$ROLE" == "3" ]]; then
-  echo "  Starting gateway in background on port ${GATEWAY_PORT} ..."
-  microwave-gateway --host 0.0.0.0 --port "$GATEWAY_PORT" &
-  GATEWAY_PID=$!
-  echo "  Gateway PID: ${GATEWAY_PID}"
-  sleep 1
-  enable_tailscale_funnel
-  echo ""
-  echo "  Starting node on port ${NODE_PORT} ..."
-  microwave-node \
-    --gateway-url "$GATEWAY_URL" \
-    --region "$REGION" \
-    --model "$MODEL" \
-    --host "$NODE_IP" \
-    --port "$NODE_PORT"
-elif [[ "$ROLE" == "1" ]]; then
-  echo "  Starting gateway on port ${GATEWAY_PORT} ..."
-  enable_tailscale_funnel
-  echo ""
-  echo -e "  ${DIM}Control plane: http://${NODE_IP}:${GATEWAY_PORT}/${RESET}"
-  echo -e "  ${DIM}Chat UI:       http://${NODE_IP}:${GATEWAY_PORT}/chat-ui${RESET}"
-  if [ -n "$WAN_IP" ]; then
-    echo -e "  ${DIM}WAN base URL:  http://${WAN_IP}:${GATEWAY_PORT}${RESET}"
-  fi
-  if [ -n "$TAILSCALE_FUNNEL_URL" ]; then
-    echo -e "  ${DIM}Funnel URL:    ${TAILSCALE_FUNNEL_URL}${RESET}"
-  fi
-  echo ""
-  microwave-gateway --host 0.0.0.0 --port "$GATEWAY_PORT"
-elif [[ "$REVERSE_MODE" == true ]]; then
-  echo "  Starting node in reverse mode (WebSocket) ..."
-  microwave-node \
-    --gateway-url "$GATEWAY_URL" \
-    --region "$REGION" \
-    --model "$MODEL" \
-    --reverse
-else
-  echo "  Starting node on port ${NODE_PORT} ..."
-  microwave-node \
-    --gateway-url "$GATEWAY_URL" \
-    --region "$REGION" \
-    --model "$MODEL" \
-    --host "$NODE_IP" \
-    --port "$NODE_PORT"
-fi
+# ── start ────────────────────────────────────
+echo -e "${GREEN}Setup complete. Starting node ...${RESET}"
+echo ""
+microwave-node \
+  --gateway-url "$GATEWAY_URL" \
+  --region "$REGION" \
+  --model "$MODEL" \
+  --reverse
