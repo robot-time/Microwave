@@ -26,7 +26,8 @@ cd Microwave
 bash setup.sh
 ```
 
-The script auto-detects your IP, asks if you want to run a **Gateway**, a **Node**, or **Both**, picks a model, and starts everything.
+The script auto-detects your IP, asks if you want to run a **Gateway**, a **Node**, or **Both**, picks a model, and starts everything. Once a node connects, it drops you into an **interactive terminal chat** so you can talk to the model right away.
+
 #### Admin-less Windows setup
 
 If you don't have administrator rights on Windows, you can still get running using the Microsoft Store Python and Git Bash:
@@ -72,9 +73,10 @@ Then start the gateway manually:
    ```bash
    microwave-gateway --host 0.0.0.0 --port 8000
    ```
+
 ### Adding more machines
 
-Run `bash setup.sh` on another computer, choose **Node**, and enter the gateway's IP when prompted. It self-registers automatically.
+Run `bash setup.sh` on another computer, choose **Node**, and enter the gateway's IP when prompted. It self-registers automatically and opens the terminal chat.
 
 ### Use it
 
@@ -82,6 +84,7 @@ Run `bash setup.sh` on another computer, choose **Node**, and enter the gateway'
 |------|-----|
 | Dashboard (nodes, health, ping) | `http://GATEWAY_IP:8000/` |
 | Chat UI | `http://GATEWAY_IP:8000/chat-ui` |
+| Terminal chat | Built-in – starts automatically when the node boots |
 | Raw API | see below |
 
 ```bash
@@ -90,13 +93,55 @@ curl -N http://GATEWAY_IP:8000/chat \
   -d '{"prompt": "What is Microwave AI?", "region": "LAN", "model": "llama3.2"}'
 ```
 
-### Windows note
+---
 
-On Windows, run `setup.sh` inside **Git Bash**. If the gateway can't reach your node, allow the port through Windows Firewall (Admin PowerShell):
+## WAN / Internet Mode (Reverse Connection)
 
-```powershell
-netsh advfirewall firewall add rule name="Microwave Node" dir=in action=allow protocol=TCP localport=9000
+Nodes can connect from **anywhere on the internet** – no open ports, no firewall changes, no admin required.
+
+### How it works
+
+```text
+Node connects OUT ──WebSocket──► Gateway (public IP, port 8000)
+                                    │
+User ──POST /chat──────────────────►│
+                                    │  sends task down WS
+Gateway ────────────────────────────► Node
+                                    │  streams Ollama tokens back up WS
+User ◄──streaming response──────────┘
 ```
+
+The node makes an **outbound** WebSocket connection to the gateway. The gateway pushes tasks down that pipe. No inbound ports needed on the node side.
+
+### Quick setup
+
+On the node machine (anywhere with internet):
+
+```bash
+git clone https://github.com/robot-time/Microwave.git
+cd Microwave
+bash setup.sh
+# Choose Node → choose Reverse (default)
+# Enter gateway URL: http://YOUR_GATEWAY_PUBLIC_IP:8000
+```
+
+Or manually:
+
+```bash
+microwave-node \
+  --gateway-url http://YOUR_GATEWAY_PUBLIC_IP:8000 \
+  --region US-EAST \
+  --model llama3.2 \
+  --reverse
+```
+
+Both **LAN nodes** (direct HTTP) and **internet nodes** (reverse WebSocket) can connect to the same gateway simultaneously.
+
+### Gateway requirements for WAN
+
+The gateway machine needs:
+- A **public IP** or port-forwarding for port 8000
+- Or run behind a reverse proxy / tunnel (ngrok, Cloudflare Tunnel, etc.)
 
 ---
 
@@ -116,8 +161,8 @@ Each node runs a **complete model**. The gateway picks the best node based on re
 | Phase | Goal | Status |
 |-------|------|--------|
 | **0** | 2+ machines on a LAN serving a model | **done** |
-| **1** | 5–10 LAN nodes, health checks, load balancing | in progress |
-| **2** | WAN test across the internet, regional routing | planned |
+| **1** | 5–10 LAN nodes, health checks, load balancing | **done** |
+| **2** | WAN support – nodes connect from anywhere via reverse WebSocket | **done** |
 | **3** | Model marketplace – nodes advertise capabilities | planned |
 | **4** | Reputation system, incentives | planned |
 | **5** | Research: distributed Mixture-of-Experts | future |
@@ -210,7 +255,7 @@ Each node is an independent inference engine. The network discovers nodes, track
 }
 ```
 
-### Request flow
+### Request flow (HTTP mode)
 
 1. Node starts → sends `POST /nodes/register` to the gateway.
 2. User sends `POST /chat` to the gateway.
@@ -218,6 +263,14 @@ Each node is an independent inference engine. The network discovers nodes, track
 4. Gateway forwards `POST /infer` to the node.
 5. Node calls Ollama's `/api/generate` and streams tokens.
 6. Gateway relays the stream back to the user.
+
+### Request flow (Reverse/WS mode)
+
+1. Node connects outbound to `ws://gateway:8000/nodes/ws` and registers.
+2. User sends `POST /chat` to the gateway.
+3. Gateway picks the best node and sends a task down the WebSocket.
+4. Node calls Ollama locally and streams token chunks back up the WebSocket.
+5. Gateway relays the stream back to the user.
 
 ---
 
@@ -252,13 +305,14 @@ Nodes accumulate a score based on uptime, latency, successful requests, and resp
 
 ---
 
-## APIs (Phase 0)
+## APIs
 
 ### Gateway
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/nodes/register` | POST | Register a node |
+| `/nodes/register` | POST | Register a node (HTTP mode) |
+| `/nodes/ws` | WebSocket | Reverse-connect a node (WAN mode) |
 | `/nodes` | GET | List registered nodes |
 | `/nodes/health` | POST | Ping all nodes and update latency |
 | `/chat` | POST | Send a prompt (streaming response) |
@@ -279,16 +333,18 @@ Nodes accumulate a score based on uptime, latency, successful requests, and resp
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/health` | GET | Liveness check |
-| `/infer` | POST | Run inference (called by gateway) |
+| `/health` | GET | Liveness check (HTTP mode only) |
+| `/infer` | POST | Run inference (HTTP mode, called by gateway) |
+
+In reverse mode, the node has no HTTP endpoints – all communication happens over the WebSocket.
 
 ---
 
 ## Tech Stack
 
-- **Python** – FastAPI + httpx + uvicorn
+- **Python** – FastAPI + httpx + uvicorn + websockets
 - **Ollama** – local LLM runtime on each node
-- Protocol is plain HTTP/JSON, easy to re-implement in Go, Rust, or Node.js later
+- Protocol is plain HTTP/JSON + WebSocket, easy to re-implement in Go, Rust, or Node.js later
 
 ---
 
@@ -309,7 +365,7 @@ pip install -e .
 microwave-gateway --host 0.0.0.0 --port 8000
 ```
 
-### Node
+### Node (LAN / direct HTTP)
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -321,5 +377,19 @@ microwave-node \
   --host THIS_MACHINE_IP \
   --port 9000
 ```
+
+### Node (WAN / reverse WebSocket)
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
+microwave-node \
+  --gateway-url http://GATEWAY_PUBLIC_IP:8000 \
+  --region US-EAST \
+  --model llama3.2 \
+  --reverse
+```
+
+Use `--no-chat` to disable the interactive terminal chat (e.g. for headless/daemon mode).
 
 </details>
