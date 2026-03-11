@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import platform
+import ssl
 import sys
 from typing import Any, Dict
 
@@ -133,13 +134,15 @@ async def terminal_chat() -> None:
                     async for chunk in resp.aiter_bytes():
                         if not chunk:
                             continue
+                        text = chunk.decode("utf-8", errors="replace")
                         try:
-                            obj = json.loads(chunk)
+                            obj = json.loads(text)
                             token = obj.get("response", "")
                             if token:
                                 print(token, end="", flush=True)
                         except json.JSONDecodeError:
-                            pass
+                            # Fallback: print raw text (Windows / proxies sometimes wrap JSON)
+                            print(text, end="", flush=True)
         except httpx.ConnectError:
             print(f"\n{DIM}(Ollama not reachable at {OLLAMA_URL} – is it running?){RESET}")
         except Exception as e:
@@ -181,10 +184,19 @@ async def _ws_listener(gateway_url: str) -> None:
 
     ws_url = gateway_url.replace("http://", "ws://").replace("https://", "wss://")
     ws_url = f"{ws_url.rstrip('/')}/nodes/ws"
+    insecure_tls = os.getenv("MICROWAVE_INSECURE_TLS", "").lower() in ("1", "true", "yes")
+    warned_about_tls = False
 
     while True:
         try:
-            async with websockets.connect(ws_url, ping_interval=20, ping_timeout=60) as ws:
+            connect_kwargs = {"ping_interval": 20, "ping_timeout": 60}
+            if ws_url.startswith("wss://") and insecure_tls:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                connect_kwargs["ssl"] = ctx
+
+            async with websockets.connect(ws_url, **connect_kwargs) as ws:
                 await ws.send(json.dumps({
                     "type": "register",
                     "node_id": NODE_ID,
@@ -210,6 +222,24 @@ async def _ws_listener(gateway_url: str) -> None:
                     elif msg.get("type") == "ping":
                         await ws.send(json.dumps({"type": "pong"}))
 
+        except ssl.SSLCertVerificationError as e:
+            # Auto-fallback for environments with intercepting/self-signed cert chains.
+            if ws_url.startswith("wss://") and not insecure_tls:
+                if not warned_about_tls:
+                    print(
+                        f"\n{YELLOW}TLS verification failed ({e}). "
+                        f"Retrying with insecure TLS for this node.{RESET}"
+                    )
+                    print(
+                        f"{DIM}Set MICROWAVE_INSECURE_TLS=1 to make this explicit, "
+                        f"or use a valid certificate chain.{RESET}"
+                    )
+                    warned_about_tls = True
+                insecure_tls = True
+                await asyncio.sleep(1)
+                continue
+            print(f"\n{DIM}Connection lost: {e}. Reconnecting in 5s ...{RESET}")
+            await asyncio.sleep(5)
         except Exception as e:
             print(f"\n{DIM}Connection lost: {e}. Reconnecting in 5s ...{RESET}")
             await asyncio.sleep(5)
