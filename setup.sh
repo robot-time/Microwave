@@ -8,12 +8,6 @@ set -e
 REPO_URL="https://github.com/robot-time/Microwave.git"
 REPO_DIR="Microwave"
 
-# ── platform detection ───────────────────────
-IS_WINDOWS=false
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=true ;;
-esac
-
 # ── find python binary ───────────────────────
 PYTHON=""
 for cmd in python3 python; do
@@ -35,6 +29,24 @@ YELLOW="\033[1;33m"
 RED="\033[1;31m"
 DIM="\033[2m"
 RESET="\033[0m"
+
+# ── are we already inside the repo? ──────────
+# If pyproject.toml exists here, we're already in the repo – just pull.
+# Otherwise clone/pull into a subdirectory, then re-exec from the new copy.
+if [ ! -f "pyproject.toml" ]; then
+  if [ -d "$REPO_DIR/.git" ]; then
+    echo "Updating repo ..."
+    git -C "$REPO_DIR" pull --ff-only || true
+  else
+    echo "Cloning repo ..."
+    git clone "$REPO_URL" "$REPO_DIR"
+  fi
+  cd "$REPO_DIR"
+  # Re-exec the UPDATED setup.sh so all fixes take effect
+  exec bash setup.sh
+fi
+
+# ── From here on, we are definitely inside the repo ──
 
 clear
 
@@ -61,18 +73,24 @@ detect_ip() {
   if [ -z "$ip" ] && command -v ip >/dev/null 2>&1; then
     ip=$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ { print $7; exit }')
   fi
-  # macOS: ipconfig getifaddr
-  if [ -z "$ip" ] && [ "$IS_WINDOWS" = false ] && command -v ipconfig >/dev/null 2>&1; then
-    ip=$(ipconfig getifaddr en0 2>/dev/null || true)
-    [ -z "$ip" ] && ip=$(ipconfig getifaddr en1 2>/dev/null || true)
+  # macOS: ipconfig getifaddr (skip on Windows where ipconfig is a different tool)
+  if [ -z "$ip" ]; then
+    local maybe_mac
+    maybe_mac=$(ipconfig getifaddr en0 2>/dev/null || true)
+    [ -n "$maybe_mac" ] && ip="$maybe_mac"
   fi
-  # Windows (Git Bash / MINGW): parse ipconfig output for IPv4
-  if [ -z "$ip" ] && [ "$IS_WINDOWS" = true ]; then
-    ip=$(ipconfig.exe 2>/dev/null | grep -i "IPv4" | head -1 | sed 's/.*: //' | tr -d '\r')
+  if [ -z "$ip" ]; then
+    local maybe_mac
+    maybe_mac=$(ipconfig getifaddr en1 2>/dev/null || true)
+    [ -n "$maybe_mac" ] && ip="$maybe_mac"
+  fi
+  # Windows (Git Bash / MINGW): parse ipconfig.exe for IPv4
+  if [ -z "$ip" ] && command -v ipconfig.exe >/dev/null 2>&1; then
+    ip=$(ipconfig.exe 2>/dev/null | grep -i "IPv4" | head -1 | sed 's/.*: //' | tr -d '\r' || true)
   fi
   # Fallback: hostname -I (Linux)
   if [ -z "$ip" ] && command -v hostname >/dev/null 2>&1; then
-    ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
   fi
   echo "$ip"
 }
@@ -168,39 +186,41 @@ read -rp "  Looks good? Start setup (y/n) [y]: " _confirm
 [[ "$_confirm" == "n" || "$_confirm" == "N" ]] && echo "Aborted." && exit 0
 echo ""
 
-# ── clone / update repo ───────────────────────
-echo -e "${BOLD}── Cloning / updating repo ─────────────────${RESET}"
-if [ -d "$REPO_DIR/.git" ]; then
-  echo "  Repo already exists – pulling latest..."
-  git -C "$REPO_DIR" pull --ff-only
-else
-  echo "  Cloning from ${REPO_URL} ..."
-  git clone "$REPO_URL" "$REPO_DIR"
-fi
-cd "$REPO_DIR"
+# ── pull latest (we're already in the repo) ──
+echo -e "${BOLD}── Pulling latest code ─────────────────────${RESET}"
+git pull --ff-only 2>/dev/null || true
 echo ""
 
 # ── python venv ───────────────────────────────
+# We skip 'source activate' entirely – just prepend the venv dir to PATH.
+# This works identically on Windows (Scripts/) and Unix (bin/).
 echo -e "${BOLD}── Python environment ──────────────────────${RESET}"
 if [ ! -d ".venv" ]; then
   echo "  Creating .venv ..."
   $PYTHON -m venv .venv
 fi
-# shellcheck disable=SC1091
-if [ -f ".venv/Scripts/activate" ]; then
-  source .venv/Scripts/activate
-elif [ -f ".venv/bin/activate" ]; then
-  source .venv/bin/activate
-else
-  echo -e "  ${RED}Could not find venv activate script.${RESET}"
-  echo "  Tried .venv/Scripts/activate and .venv/bin/activate"
+
+VENV_BIN=""
+if [ -d ".venv/Scripts" ]; then
+  VENV_BIN="$(cd .venv/Scripts && pwd)"
+elif [ -d ".venv/bin" ]; then
+  VENV_BIN="$(cd .venv/bin && pwd)"
+fi
+
+if [ -z "$VENV_BIN" ]; then
+  echo -e "  ${RED}venv created but Scripts/ and bin/ are both missing.${RESET}"
+  echo "  Try deleting .venv and re-running:  rm -rf .venv && bash setup.sh"
   exit 1
 fi
+
+export PATH="$VENV_BIN:$PATH"
+echo "  venv active ($VENV_BIN)"
+
 echo "  Installing microwave-ai ..."
-$PYTHON -m pip install --upgrade pip >/dev/null 2>&1 || true
-$PYTHON -m pip install -e . >/dev/null 2>&1 || {
-  echo -e "  ${RED}pip install failed. Trying with --user ...${RESET}"
-  $PYTHON -m pip install -e . --user >/dev/null 2>&1 || true
+pip install --upgrade pip >/dev/null 2>&1 || true
+pip install -e . >/dev/null 2>&1 || {
+  echo -e "  ${YELLOW}pip install -e . had issues, retrying ...${RESET}"
+  pip install -e . 2>&1 || true
 }
 echo -e "  ${GREEN}Done.${RESET}"
 echo ""
@@ -209,7 +229,7 @@ echo ""
 if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
   echo -e "${BOLD}── Ollama check ────────────────────────────${RESET}"
   if ! command -v ollama >/dev/null 2>&1; then
-    echo -e "  ${YELLOW}Ollama is not installed.${RESET}"
+    echo -e "  ${YELLOW}Ollama is not installed (or not in PATH).${RESET}"
     echo "  Install it from https://ollama.com and re-run this script."
     echo "  Or install it now and press Enter to continue."
     read -rp "  Press Enter once Ollama is installed... " _
@@ -226,13 +246,15 @@ if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
 fi
 
 # ── Windows firewall hint ────────────────────
-if [[ "$IS_WINDOWS" = true && ("$ROLE" == "2" || "$ROLE" == "3") ]]; then
-  echo -e "${YELLOW}── Windows Firewall ────────────────────────${RESET}"
-  echo -e "  The gateway needs to reach this node on port ${CYAN}${NODE_PORT}${RESET}."
-  echo -e "  If health checks fail, allow the port through the firewall:"
-  echo -e "  ${DIM}  (Run in an Admin PowerShell)${RESET}"
-  echo -e "  ${CYAN}netsh advfirewall firewall add rule name=\"Microwave Node\" dir=in action=allow protocol=TCP localport=${NODE_PORT}${RESET}"
-  echo ""
+if command -v ipconfig.exe >/dev/null 2>&1; then
+  if [[ "$ROLE" == "2" || "$ROLE" == "3" ]]; then
+    echo -e "${YELLOW}── Windows Firewall ────────────────────────${RESET}"
+    echo -e "  The gateway needs to reach this node on port ${CYAN}${NODE_PORT}${RESET}."
+    echo -e "  If health checks fail, allow the port through the firewall:"
+    echo -e "  ${DIM}  (Run in an Admin PowerShell)${RESET}"
+    echo -e "  ${CYAN}netsh advfirewall firewall add rule name=\"Microwave Node\" dir=in action=allow protocol=TCP localport=${NODE_PORT}${RESET}"
+    echo ""
+  fi
 fi
 
 # ── start services ────────────────────────────
@@ -240,7 +262,6 @@ echo -e "${BOLD}── Starting Microwave AI ───────────�
 echo ""
 
 if [[ "$ROLE" == "3" ]]; then
-  # Both: start gateway in background, then node in foreground
   echo "  Starting gateway in background on port ${GATEWAY_PORT} ..."
   microwave-gateway --host 0.0.0.0 --port "$GATEWAY_PORT" &
   GATEWAY_PID=$!
