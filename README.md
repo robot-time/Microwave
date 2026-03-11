@@ -32,7 +32,7 @@ The script auto-detects your IP, asks if you want to run a **Gateway**, a **Node
 If you don't have administrator rights on Windows, you can still get running using the Microsoft Store Python and Git Bash:
 
 1. **Install Python from the Microsoft Store**
-   - Open the Microsoft Store and search for **"Python"** (for example, **Python 3.x** from the Python Software Foundation).
+   - Google: Python, Downloads > Windows Python install manager
    - Click **Get** / **Install** and wait for it to finish.
    - When Windows prompts you to **"Open app execution aliases"** or **"Open Settings"**, open the **App execution aliases** settings page and **turn OFF** all toggles for `python.exe` and `python3.exe` so your shell uses the real Python installation.
 
