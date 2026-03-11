@@ -28,6 +28,16 @@ bash setup.sh
 
 The script auto-detects your IP, asks if you want to run a **Gateway**, a **Node**, or **Both**, picks a model, and starts everything. Once a node connects, it drops you into an **interactive terminal chat** so you can talk to the model right away.
 
+#### Quick run (after setup)
+
+After you've run `setup.sh` once, you can use the lightweight runner:
+
+```bash
+bash run.sh
+```
+
+`run.sh` skips clone/install and just starts Gateway/Node/Both with quick prompts.
+
 #### Admin-less Windows setup
 
 If you don't have administrator rights on Windows, you can still get running using the Microsoft Store Python and Git Bash:
@@ -144,11 +154,11 @@ microwave-node \
 If you're a friend of Miles and want to connect your machine as a node to his gateway:
 
 - **Gateway (Miles)**
-  - On the Linux server running the gateway, find the public IP:
+  - On the Linux server running the gateway, use the Tailscale gateway IP:
 
     ```bash
-    curl ifconfig.me
-    # e.g. prints: 119.15.77.11
+    tailscale ip -4
+    # 100.125.40.61
     ```
 
   - Run the gateway via the setup script:
@@ -170,7 +180,7 @@ If you're a friend of Miles and want to connect your machine as a node to his ga
     bash setup.sh
     # Choose Node
     # Choose Reverse (WAN)
-    # Gateway URL: http://119.15.77.11:8000
+    # Gateway URL: http://100.125.40.61:8000
     # Region: ADL
     ```
 
@@ -178,13 +188,19 @@ If you're a friend of Miles and want to connect your machine as a node to his ga
 
     ```bash
     microwave-node \
-      --gateway-url http://119.15.77.11:8000 \
+      --gateway-url http://100.125.40.61:8000 \
       --region ADL \
       --model llama3.2 \
       --reverse
     ```
 
 Both **LAN nodes** (direct HTTP) and **internet nodes** (reverse WebSocket) can connect to the same gateway simultaneously.
+
+### Auto Funnel (default)
+
+When you run `bash setup.sh` in **Gateway** or **Both** mode, the script now tries to auto-enable
+Tailscale Serve + Funnel (if `tailscale` is installed on the gateway machine). If successful, it prints
+the public Funnel URL and you can use that directly as `--gateway-url` on nodes that do not have Tailscale.
 
 ### Gateway requirements for WAN
 

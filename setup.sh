@@ -97,6 +97,7 @@ detect_ip() {
 
 NODE_IP=$(detect_ip)
 WAN_IP=""
+TAILSCALE_FUNNEL_URL=""
 
 detect_wan_ip() {
   local wan=""
@@ -107,6 +108,50 @@ detect_wan_ip() {
     wan=$(wget -qO- --timeout=3 https://api.ipify.org 2>/dev/null || true)
   fi
   echo "$wan"
+}
+
+detect_tailscale_funnel_url() {
+  local url=""
+  if command -v tailscale >/dev/null 2>&1; then
+    url=$(tailscale funnel status 2>/dev/null | awk '/https:\/\//{print $1; exit}' || true)
+  fi
+  echo "$url"
+}
+
+enable_tailscale_funnel() {
+  # Auto-enable Funnel so non-Tailscale clients can connect.
+  if ! command -v tailscale >/dev/null 2>&1; then
+    return
+  fi
+
+  echo -e "${BOLD}── Tailscale Funnel (auto) ─────────────────${RESET}"
+  echo "  Attempting to expose gateway via Tailscale Funnel ..."
+
+  local serve_ok=false
+  local funnel_ok=false
+
+  if tailscale serve --bg --tcp "$GATEWAY_PORT" "127.0.0.1:${GATEWAY_PORT}" >/dev/null 2>&1; then
+    serve_ok=true
+  elif command -v sudo >/dev/null 2>&1 && sudo tailscale serve --bg --tcp "$GATEWAY_PORT" "127.0.0.1:${GATEWAY_PORT}" >/dev/null 2>&1; then
+    serve_ok=true
+  fi
+
+  if tailscale funnel --bg "$GATEWAY_PORT" >/dev/null 2>&1; then
+    funnel_ok=true
+  elif command -v sudo >/dev/null 2>&1 && sudo tailscale funnel --bg "$GATEWAY_PORT" >/dev/null 2>&1; then
+    funnel_ok=true
+  fi
+
+  TAILSCALE_FUNNEL_URL="$(detect_tailscale_funnel_url)"
+  if [[ "$serve_ok" == true && "$funnel_ok" == true && -n "$TAILSCALE_FUNNEL_URL" ]]; then
+    echo -e "  ${GREEN}Funnel enabled:${RESET} ${CYAN}${TAILSCALE_FUNNEL_URL}${RESET}"
+  else
+    echo -e "  ${YELLOW}Could not auto-enable Funnel.${RESET}"
+    echo "  If needed, run manually on gateway:"
+    echo "    sudo tailscale serve --bg --tcp ${GATEWAY_PORT} 127.0.0.1:${GATEWAY_PORT}"
+    echo "    sudo tailscale funnel --bg ${GATEWAY_PORT}"
+  fi
+  echo ""
 }
 
 if [ -z "$NODE_IP" ]; then
@@ -129,10 +174,14 @@ echo ""
 
 if [[ "$ROLE" == "1" || "$ROLE" == "3" ]]; then
   WAN_IP=$(detect_wan_ip)
+  TAILSCALE_FUNNEL_URL="$(detect_tailscale_funnel_url)"
   if [ -n "$WAN_IP" ]; then
     echo -e "  Detected WAN IP: ${CYAN}${WAN_IP}${RESET}"
   else
     echo -e "  Detected WAN IP: ${DIM}(unavailable right now)${RESET}"
+  fi
+  if [ -n "$TAILSCALE_FUNNEL_URL" ]; then
+    echo -e "  Existing Funnel: ${CYAN}${TAILSCALE_FUNNEL_URL}${RESET}"
   fi
   echo ""
 fi
@@ -209,6 +258,11 @@ if [[ "$ROLE" == "1" || "$ROLE" == "3" ]]; then
   echo -e "  Gateway URL: ${CYAN}http://${NODE_IP}:${GATEWAY_PORT}${RESET}"
   if [ -n "$WAN_IP" ]; then
     echo -e "  WAN URL:     ${CYAN}http://${WAN_IP}:${GATEWAY_PORT}${RESET}"
+  fi
+  if [ -n "$TAILSCALE_FUNNEL_URL" ]; then
+    echo -e "  Funnel URL:  ${CYAN}${TAILSCALE_FUNNEL_URL}${RESET}"
+  else
+    echo -e "  Funnel URL:  ${DIM}(will auto-configure if tailscale is available)${RESET}"
   fi
   echo -e "  Control:     ${CYAN}http://${NODE_IP}:${GATEWAY_PORT}/${RESET}"
   echo -e "  Chat UI:     ${CYAN}http://${NODE_IP}:${GATEWAY_PORT}/chat-ui${RESET}"
@@ -333,6 +387,7 @@ if [[ "$ROLE" == "3" ]]; then
   GATEWAY_PID=$!
   echo "  Gateway PID: ${GATEWAY_PID}"
   sleep 1
+  enable_tailscale_funnel
   echo ""
   echo "  Starting node on port ${NODE_PORT} ..."
   microwave-node \
@@ -343,11 +398,15 @@ if [[ "$ROLE" == "3" ]]; then
     --port "$NODE_PORT"
 elif [[ "$ROLE" == "1" ]]; then
   echo "  Starting gateway on port ${GATEWAY_PORT} ..."
+  enable_tailscale_funnel
   echo ""
   echo -e "  ${DIM}Control plane: http://${NODE_IP}:${GATEWAY_PORT}/${RESET}"
   echo -e "  ${DIM}Chat UI:       http://${NODE_IP}:${GATEWAY_PORT}/chat-ui${RESET}"
   if [ -n "$WAN_IP" ]; then
     echo -e "  ${DIM}WAN base URL:  http://${WAN_IP}:${GATEWAY_PORT}${RESET}"
+  fi
+  if [ -n "$TAILSCALE_FUNNEL_URL" ]; then
+    echo -e "  ${DIM}Funnel URL:    ${TAILSCALE_FUNNEL_URL}${RESET}"
   fi
   echo ""
   microwave-gateway --host 0.0.0.0 --port "$GATEWAY_PORT"
