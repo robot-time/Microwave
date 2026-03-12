@@ -994,34 +994,23 @@ def _build_chat_ui_html() -> str:
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Microwave AI Chat</title>
+  <title>Microwave AI</title>
   <style>
     :root {
-      --bg-0: #0a0b0f;
-      --bg-1: #131520;
-      --bg-2: #181b28;
-      --bg-3: #222738;
-      --panel: #161a26;
-      --text-0: #f8fafc;
-      --text-1: #d1d5db;
-      --text-2: #9ca3af;
-      --text-3: #6b7280;
-      --line: #2b3145;
-      --accent: #f97316;
-      --accent-soft: #fb923c;
-      --accent-glow: rgba(249, 115, 22, 0.35);
-      --good: #34d399;
-      --bad: #fb7185;
+      --bg: #ffffff;
+      --panel: #f5f5f5;
+      --border: #e0e0e0;
+      --text: #111;
+      --text-muted: #6b7280;
+      --input-bg: #f5f5f5;
+      --btn-bg: #111;
+      --btn-text: #fff;
     }
-
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background:
-        radial-gradient(circle at 20% -20%, rgba(249, 115, 22, 0.25), transparent 40%),
-        radial-gradient(circle at 90% 20%, rgba(56, 189, 248, 0.12), transparent 35%),
-        var(--bg-0);
-      color: var(--text-0);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
       height: 100vh;
       display: flex;
       overflow: hidden;
@@ -1029,106 +1018,98 @@ def _build_chat_ui_html() -> str:
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
     #sidebar {
-      width: 250px; min-width: 250px;
-      background: linear-gradient(180deg, #10131d, #0d1018);
+      width: 220px; min-width: 220px;
+      background: var(--panel);
       display: flex; flex-direction: column;
-      padding: 1rem 0.65rem 0.65rem;
-      border-right: 1px solid var(--line);
-      gap: 0.45rem;
+      padding: 1rem 0.6rem;
+      border-right: 1px solid var(--border);
+      gap: 0.4rem;
     }
-    .brand { display: flex; align-items: center; gap: 0.55rem; padding: 0 0.45rem 0.35rem; }
-    .brand-icon {
-      width: 30px; height: 30px; border-radius: 9px;
-      border: 1px solid rgba(251, 146, 60, 0.6);
-      background: linear-gradient(160deg, #2f364d, #171b2a);
-      display: grid; place-items: center;
-      box-shadow: 0 0 16px rgba(251, 146, 60, 0.22);
-      font-size: 0.95rem;
-    }
-    .brand h1 { font-size: 0.9rem; line-height: 1.1; }
-    .brand p { font-size: 0.72rem; color: var(--text-2); line-height: 1.2; }
+    .brand { padding: 0 0.4rem 0.5rem; border-bottom: 1px solid var(--border); margin-bottom: 0.3rem; }
+    .brand h1 { font-size: 0.9rem; font-weight: 600; }
+    .brand p { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.15rem; }
 
     #newChatBtn {
       display: flex; align-items: center; gap: 0.5rem;
-      padding: 0.62rem 0.7rem; border-radius: 0.72rem; cursor: pointer;
-      font-size: 0.84rem; color: var(--text-0);
-      background: linear-gradient(135deg, rgba(249, 115, 22, 0.18), rgba(249, 115, 22, 0.08));
-      border: 1px solid rgba(251, 146, 60, 0.3); width: 100%; text-align: left;
+      padding: 0.55rem 0.65rem; border-radius: 0.5rem; cursor: pointer;
+      font-size: 0.84rem; color: var(--text); background: transparent;
+      border: 1px solid var(--border); width: 100%; text-align: left;
     }
-    #newChatBtn:hover { border-color: rgba(251, 146, 60, 0.6); box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12); }
+    #newChatBtn:hover { background: var(--bg); border-color: #999; }
 
-    .history-label { font-size: 0.66rem; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.09em; padding: 0.58rem 0.6rem 0.12rem; }
-    .history-item { padding: 0.5rem 0.62rem; border-radius: 0.65rem; font-size: 0.82rem; color: var(--text-2); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border: 1px solid transparent; }
-    .history-item:hover { background: #171b27; color: var(--text-0); border-color: rgba(148, 163, 184, 0.2); }
-    .history-item.active { background: #202638; color: var(--text-0); border-color: rgba(251, 146, 60, 0.4); }
+    .history-label { font-size: 0.66rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; padding: 0.5rem 0.6rem 0.2rem; }
+    .history-item { padding: 0.45rem 0.6rem; border-radius: 0.5rem; font-size: 0.82rem; color: var(--text-muted); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .history-item:hover { background: var(--bg); color: var(--text); }
+    .history-item.active { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
     #historyList { overflow-y: auto; padding-bottom: 0.3rem; }
 
     #chatArea { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
     #topBar {
-      border-bottom: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(24, 27, 40, 0.94), rgba(24, 27, 40, 0.68));
-      padding: 0.7rem 1.2rem; display: flex; align-items: center; justify-content: space-between; gap: 0.8rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+      padding: 0.6rem 1rem; display: flex; align-items: center; justify-content: space-between; gap: 0.6rem;
     }
-    .top-title { display: flex; align-items: center; gap: 0.5rem; font-size: 0.86rem; color: var(--text-1); }
-    .dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; box-shadow: 0 0 10px rgba(52, 211, 153, 0.45); background: var(--good); }
-    .pill-row { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
-    .pill { border: 1px solid var(--line); background: rgba(19, 21, 32, 0.9); color: var(--text-2); border-radius: 999px; padding: 0.2rem 0.52rem; font-size: 0.71rem; }
-    #activeModelTag { color: #fed7aa; border-color: rgba(251, 146, 60, 0.35); }
+    .top-title { font-size: 0.84rem; color: var(--text-muted); }
+    .pill-row { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
+    .pill { border: 1px solid var(--border); background: var(--panel); color: var(--text-muted); border-radius: 999px; padding: 0.18rem 0.5rem; font-size: 0.7rem; }
 
-    #messages { flex: 1; overflow-y: auto; padding: 1.1rem 0 1.6rem; display: flex; flex-direction: column; gap: 1.1rem; }
-    .msg-row { display: flex; flex-direction: column; padding: 0 9%; }
+    #messages { flex: 1; overflow-y: auto; padding: 1rem 0 1.5rem; display: flex; flex-direction: column; gap: 1rem; }
+    .msg-row { display: flex; flex-direction: column; padding: 0 10%; }
     .msg-row.user { align-items: flex-end; }
     .msg-row.bot  { align-items: flex-start; }
-    .meta { margin-bottom: 0.28rem; font-size: 0.68rem; color: var(--text-3); display: flex; align-items: center; gap: 0.4rem; }
-    .meta .who { color: var(--text-2); }
-    .bubble { max-width: min(780px, 78%); font-size: 0.92rem; line-height: 1.58; }
-    .msg-row.user .bubble { background: linear-gradient(165deg, #343b53, #282d42); border: 1px solid #3a4462; border-radius: 1rem 1rem 0.22rem 1rem; padding: 0.62rem 0.9rem; color: #f8fafc; }
-    .msg-row.bot .bubble { background: linear-gradient(180deg, rgba(24, 28, 42, 0.72), rgba(24, 28, 42, 0.36)); border: 1px solid rgba(148, 163, 184, 0.2); border-radius: 0.9rem 0.9rem 0.9rem 0.24rem; padding: 0.58rem 0.82rem; color: #f1f5f9; white-space: pre-wrap; }
-    .bubble.loading { border-color: rgba(251, 146, 60, 0.4); background: linear-gradient(180deg, rgba(36, 29, 27, 0.95), rgba(34, 29, 29, 0.52)); color: #fdba74; }
-    .heating-wrap { display: flex; align-items: center; gap: 0.7rem; min-width: 230px; }
-    .microwave-loader { width: 26px; height: 26px; border-radius: 8px; border: 1px solid rgba(251, 146, 60, 0.7); display: grid; place-items: center; position: relative; background: rgba(18, 18, 24, 0.88); color: #fb923c; }
-    .microwave-loader::before, .microwave-loader::after { content: ""; position: absolute; inset: -3px; border-radius: 10px; border: 1px solid rgba(251, 146, 60, 0.45); opacity: 0; animation: ping 1.5s ease-out infinite; }
-    .microwave-loader::after { animation-delay: 0.45s; }
-    .heating-copy { display: flex; flex-direction: column; gap: 0.15rem; }
-    .heating-title { font-size: 0.8rem; color: #fed7aa; }
-    .heating-sub { font-size: 0.72rem; color: #cbd5e1; opacity: 0.86; }
+    .meta { margin-bottom: 0.25rem; font-size: 0.68rem; color: var(--text-muted); display: flex; align-items: center; gap: 0.35rem; }
+    .meta .who { color: var(--text); }
+    .bubble { max-width: min(720px, 80%); font-size: 0.9rem; line-height: 1.55; }
+    .msg-row.user .bubble { background: var(--text); color: var(--btn-text); border-radius: 0.85rem 0.85rem 0.2rem 0.85rem; padding: 0.55rem 0.85rem; }
+    .msg-row.bot .bubble { background: var(--panel); border: 1px solid var(--border); border-radius: 0.85rem 0.85rem 0.85rem 0.2rem; padding: 0.55rem 0.85rem; color: var(--text); white-space: pre-wrap; }
+    .bubble.loading { border-style: dashed; color: var(--text-muted); }
+    .loading-dots { display: inline-flex; gap: 0.25rem; }
+    .loading-dots span { width: 4px; height: 4px; border-radius: 50%; background: var(--text-muted); animation: blink 1s ease-in-out infinite; }
+    .loading-dots span:nth-child(2) { animation-delay: 0.15s; }
+    .loading-dots span:nth-child(3) { animation-delay: 0.3s; }
+    @keyframes blink { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
 
-    #emptyState { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.62rem; color: var(--text-2); font-size: 0.95rem; padding: 0.8rem 1rem 4rem; text-align: center; }
-    #suggestions { margin-top: 0.8rem; display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; max-width: 700px; }
-    .suggestion { border: 1px solid #38405b; background: #1b2030; color: #cbd5e1; border-radius: 999px; font-size: 0.78rem; padding: 0.38rem 0.72rem; cursor: pointer; }
-    .suggestion:hover { border-color: rgba(251, 146, 60, 0.6); color: #fff7ed; box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12); }
+    #emptyState {
+      flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 1rem; color: var(--text); font-size: 0.95rem; padding: 1rem 1rem 4rem; text-align: center;
+    }
+    .ascii-microwave {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 1rem; line-height: 1.15; letter-spacing: 0.02em;
+      color: var(--text); white-space: pre; text-align: center; margin: 0.5rem 0;
+    }
+    .loading-copy { font-size: 0.8rem; color: var(--text-muted); margin-left: 0.5rem; }
+    #emptyState .lead { font-size: 1.1rem; font-weight: 600; margin-top: 0.25rem; }
+    #emptyState .sub { font-size: 0.78rem; color: var(--text-muted); }
+    #suggestions { margin-top: 1.2rem; display: flex; flex-wrap: wrap; gap: 0.45rem; justify-content: center; max-width: 600px; }
+    .suggestion { border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 999px; font-size: 0.78rem; padding: 0.35rem 0.7rem; cursor: pointer; }
+    .suggestion:hover { background: var(--border); }
 
-    #inputArea { padding: 0.65rem 9% 1.1rem; }
-    #inputShell { background: linear-gradient(180deg, rgba(24, 28, 41, 0.95), rgba(20, 23, 34, 0.95)); border-radius: 1.05rem; padding: 0.68rem 0.68rem 0.62rem 0.95rem; display: flex; flex-direction: column; gap: 0.5rem; border: 1px solid #353f5c; box-shadow: 0 15px 40px rgba(0, 0, 0, 0.25); }
-    #promptInput { background: transparent; border: none; outline: none; color: #f8fafc; font-size: 0.92rem; resize: none; min-height: 24px; max-height: 160px; overflow-y: auto; line-height: 1.5; }
-    #promptInput::placeholder { color: #76809c; }
+    #inputArea { padding: 0.6rem 10% 1rem; }
+    #inputShell { background: var(--input-bg); border-radius: 0.75rem; padding: 0.6rem 0.6rem 0.55rem 0.9rem; display: flex; flex-direction: column; gap: 0.45rem; border: 1px solid var(--border); }
+    #promptInput { background: transparent; border: none; outline: none; color: var(--text); font-size: 0.9rem; resize: none; min-height: 24px; max-height: 160px; overflow-y: auto; line-height: 1.5; }
+    #promptInput::placeholder { color: var(--text-muted); }
     .input-footer { display: flex; align-items: center; justify-content: space-between; }
-    .input-left { display: flex; gap: 0.4rem; align-items: center; }
-    .model-select { background: #23293b; border: 1px solid #36405a; color: #d1d5db; font-size: 0.75rem; padding: 0.27rem 0.55rem; border-radius: 0.44rem; cursor: pointer; outline: none; }
-    #statusText { color: var(--text-3); font-size: 0.72rem; min-height: 1.1em; }
-    #sendBtn { min-width: 36px; height: 36px; padding: 0 0.66rem; border-radius: 50%; background: linear-gradient(170deg, #fb923c, #f97316); border: 1px solid rgba(254, 215, 170, 0.45); cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; box-shadow: 0 0 18px var(--accent-glow); color: #1f130f; }
-    #sendBtn:disabled { opacity: 0.45; cursor: default; box-shadow: none; filter: grayscale(0.35); }
-    #sendBtn.sending { animation: warmPulse 1.3s ease-in-out infinite; }
-
-    @keyframes ping { 0% { transform: scale(0.95); opacity: 0.65; } 70% { transform: scale(1.35); opacity: 0; } 100% { transform: scale(1.35); opacity: 0; } }
-    @keyframes warmPulse { 0%, 100% { box-shadow: 0 0 12px rgba(249, 115, 22, 0.28); } 50% { box-shadow: 0 0 24px rgba(249, 115, 22, 0.5); } }
+    .input-left { display: flex; gap: 0.35rem; align-items: center; }
+    .model-select { background: var(--bg); border: 1px solid var(--border); color: var(--text); font-size: 0.74rem; padding: 0.25rem 0.5rem; border-radius: 0.4rem; cursor: pointer; outline: none; }
+    #statusText { color: var(--text-muted); font-size: 0.71rem; min-height: 1.1em; }
+    #sendBtn { min-width: 34px; height: 34px; padding: 0 0.6rem; border-radius: 50%; background: var(--btn-bg); color: var(--btn-text); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    #sendBtn:disabled { opacity: 0.4; cursor: default; }
+    #sendBtn:hover:not(:disabled) { opacity: 0.9; }
 
     @media (max-width: 920px) {
       #sidebar { display: none; }
       .msg-row { padding: 0 5%; }
-      #inputArea { padding: 0.65rem 5% 1rem; }
+      #inputArea { padding: 0.6rem 5% 1rem; }
     }
   </style>
 </head>
 <body>
   <div id="sidebar">
-    <div class="brand">
-      <div class="brand-icon">&#9635;</div>
-      <div><h1>Microwave AI</h1><p>Distributed inference network</p></div>
-    </div>
+    <div class="brand"><h1>Microwave AI</h1><p>Distributed inference</p></div>
     <button id="newChatBtn">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-      New Chat Session
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+      New Chat
     </button>
     <div class="history-label">Today</div>
     <div id="historyList"></div>
@@ -1136,7 +1117,7 @@ def _build_chat_ui_html() -> str:
 
   <div id="chatArea">
     <div id="topBar">
-      <div class="top-title"><span class="dot"></span><span>Microwave ready</span></div>
+      <span class="top-title">Microwave AI</span>
       <div class="pill-row">
         <span class="pill mono" id="routePill">POST /chat</span>
         <span class="pill mono">region LAN</span>
@@ -1145,12 +1126,19 @@ def _build_chat_ui_html() -> str:
     </div>
     <div id="messages">
       <div id="emptyState">
-        <div style="font-size:2rem;filter:drop-shadow(0 0 20px rgba(249,115,22,.28));">&#128225;</div>
-        <div>What should we heat up?</div>
-        <div style="font-size:0.78rem;color:#73809f;">Microwave routes to the best experts &middot; Mixture of Experts &middot; parallel dispatch</div>
+        <pre class="ascii-microwave">     ________________
+    |.-----------.   |
+    ||   _____   |ooo|
+    ||  |     |  |ooo|
+    ||  |     |  | = |
+    ||  '-----'  | _ |
+    ||___________|[_]|
+    '----------------'</pre>
+        <div class="lead">Microwave</div>
+        <div class="sub">Ask anything — routes to the best nodes</div>
         <div id="suggestions">
           <button class="suggestion">Explain how Microwave AI routing works</button>
-          <button class="suggestion">Write a healthy microwave mug cake recipe</button>
+          <button class="suggestion">Write a quick microwave mug cake recipe</button>
           <button class="suggestion">Summarize distributed inference in 5 bullets</button>
           <button class="suggestion">Generate Python code for a websocket client</button>
         </div>
@@ -1158,7 +1146,7 @@ def _build_chat_ui_html() -> str:
     </div>
     <div id="inputArea">
       <div id="inputShell">
-        <textarea id="promptInput" rows="1" placeholder="Ask Microwave AI anything..."></textarea>
+        <textarea id="promptInput" rows="1" placeholder="Send a message"></textarea>
         <div class="input-footer">
           <div class="input-left">
             <select id="modelSelect" class="model-select">
@@ -1226,7 +1214,7 @@ def _build_chat_ui_html() -> str:
   function createLoadingBubble() {
     const { row, bubble } = appendBubble('bot', '', { streaming: true, model: modelSelect.value });
     bubble.classList.add('loading');
-    bubble.innerHTML = '<div class="heating-wrap"><div class="microwave-loader">~</div><div class="heating-copy"><div class="heating-title">Heating response...</div><div class="heating-sub">Routing &middot; MoE expert dispatch</div></div></div>';
+    bubble.innerHTML = '<div class="loading-dots"><span></span><span></span><span></span></div> <span class="loading-copy">Heating...</span>';
     return { row, bubble };
   }
   function updateSendBtn() { sendBtn.disabled = isSending || !promptEl.value.trim().length; }
