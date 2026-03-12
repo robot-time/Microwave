@@ -1,10 +1,11 @@
 import argparse
 import asyncio
+import json
 import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -12,6 +13,12 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 import uvicorn
 
 from . import __version__
+from .network.latency import LatencyTracker
+from .network.topology import TopologyManager
+from .network.region import RegionEngine
+from .inference.moe import MoECoordinator, ExpertInfo, AggregationStrategy
+from .inference.router import ExpertRouter, classify_prompt
+from .inference.speculative import SpeculativeDecoder
 
 
 def print_banner() -> None:
@@ -41,6 +48,15 @@ class NodeInfo:
     last_heartbeat: float = 0.0
     last_latency_ms: float = -1.0
     is_ws: bool = False
+    latitude: float = 0.0
+    longitude: float = 0.0
+    vram_mb: int = 0
+    ram_mb: int = 0
+    compute_score: float = 0.0
+    engine_type: str = "ollama"
+    loaded_layers: Optional[Tuple[int, int]] = None
+    draft_models: List[str] = field(default_factory=list)
+    expert_domains: List[str] = field(default_factory=lambda: ["general"])
 
     @property
     def base_url(self) -> str:
@@ -49,9 +65,21 @@ class NodeInfo:
 
 app = FastAPI(title="Microwave AI Gateway")
 nodes: Deque[NodeInfo] = deque()
-_rr_index = 0
-HEALTH_INTERVAL_SECONDS = 10
+
+HEALTH_INTERVAL_SECONDS = 3
+TOPOLOGY_MEASURE_INTERVAL = 60
 _health_task = None
+_topology_task = None
+
+latency_tracker = LatencyTracker(alpha=0.3, failure_penalty_ms=500.0)
+topology_manager = TopologyManager(stale_seconds=120.0)
+region_engine = RegionEngine(max_pipeline_distance_km=500.0)
+moe_coordinator = MoECoordinator(default_k=2, max_k=5)
+expert_router = ExpertRouter(
+    latency_tracker=latency_tracker,
+    region_engine=region_engine,
+)
+speculative_decoder = SpeculativeDecoder(draft_k=5, min_k=2, max_k=12)
 
 # WebSocket reverse-connected nodes
 _ws_connections: Dict[str, WebSocket] = {}
@@ -60,7 +88,7 @@ _task_queues: Dict[str, asyncio.Queue] = {}
 
 
 async def _periodic_health_check() -> None:
-    """Background loop: ping every registered node every HEALTH_INTERVAL_SECONDS."""
+    """Background loop: ping every registered node with EWMA tracking."""
     while True:
         await asyncio.sleep(HEALTH_INTERVAL_SECONDS)
         if not nodes:
@@ -75,42 +103,119 @@ async def _periodic_health_check() -> None:
                             start = time.perf_counter()
                             async with lock:
                                 await ws.send_json({"type": "ping"})
+                            rtt = (time.perf_counter() - start) * 1000.0
                             node.last_heartbeat = time.time()
-                            node.last_latency_ms = (time.perf_counter() - start) * 1000.0
+                            node.last_latency_ms = rtt
+                            latency_tracker.record(node.node_id, rtt)
                         except Exception:
                             node.last_latency_ms = -1.0
+                            latency_tracker.record_failure(node.node_id)
                     else:
                         node.last_latency_ms = -1.0
+                        latency_tracker.record_failure(node.node_id)
                 else:
                     start = time.perf_counter()
                     try:
-                        resp = await client.get(f"{node.base_url}/health", timeout=3.0)
+                        resp = await client.get(
+                            f"{node.base_url}/health", timeout=3.0
+                        )
                         if resp.status_code == 200:
+                            rtt = (time.perf_counter() - start) * 1000.0
                             node.last_heartbeat = time.time()
-                            node.last_latency_ms = (time.perf_counter() - start) * 1000.0
+                            node.last_latency_ms = rtt
+                            latency_tracker.record(node.node_id, rtt)
                         else:
                             node.last_latency_ms = -1.0
+                            latency_tracker.record_failure(node.node_id)
                     except Exception:
                         node.last_latency_ms = -1.0
+                        latency_tracker.record_failure(node.node_id)
+
+
+async def _periodic_topology_measure() -> None:
+    """Background loop: measure inter-node latencies for pipeline optimization."""
+    while True:
+        await asyncio.sleep(TOPOLOGY_MEASURE_INTERVAL)
+        node_ids = [n.node_id for n in nodes if n.is_ws]
+        if len(node_ids) < 2:
+            continue
+
+        pairs = topology_manager.needs_measurement(node_ids)
+        for src, dst in pairs[:10]:
+            ws = _ws_connections.get(src)
+            lock = _ws_locks.get(src)
+            if not ws or not lock:
+                continue
+            try:
+                async with lock:
+                    await ws.send_json(
+                        {
+                            "type": "measure_peer",
+                            "target_node_id": dst,
+                        }
+                    )
+            except Exception:
+                pass
 
 
 @app.on_event("startup")
-async def start_health_loop() -> None:
-    global _health_task
+async def start_background_loops() -> None:
+    global _health_task, _topology_task
     _health_task = asyncio.create_task(_periodic_health_check())
+    _topology_task = asyncio.create_task(_periodic_topology_measure())
 
 
-def _upsert_node(node_id: str, host: str, port: int, region: str,
-                 models: List[str], metadata: Dict[str, Any],
-                 is_ws: bool = False) -> NodeInfo:
+def _upsert_node(
+    node_id: str,
+    host: str,
+    port: int,
+    region: str,
+    models: List[str],
+    metadata: Dict[str, Any],
+    is_ws: bool = False,
+    latitude: float = 0.0,
+    longitude: float = 0.0,
+    vram_mb: int = 0,
+    ram_mb: int = 0,
+    compute_score: float = 0.0,
+    engine_type: str = "ollama",
+    draft_models: Optional[List[str]] = None,
+    expert_domains: Optional[List[str]] = None,
+) -> NodeInfo:
     global nodes
+    domains = expert_domains or ["general"]
     nodes = deque(n for n in nodes if n.node_id != node_id)
     info = NodeInfo(
-        node_id=node_id, host=host, port=port, region=region,
-        models=models, metadata=metadata,
-        last_heartbeat=time.time(), last_latency_ms=0.0, is_ws=is_ws,
+        node_id=node_id,
+        host=host,
+        port=port,
+        region=region,
+        models=models,
+        metadata=metadata,
+        last_heartbeat=time.time(),
+        last_latency_ms=0.0,
+        is_ws=is_ws,
+        latitude=latitude,
+        longitude=longitude,
+        vram_mb=vram_mb,
+        ram_mb=ram_mb,
+        compute_score=compute_score,
+        engine_type=engine_type,
+        draft_models=draft_models or [],
+        expert_domains=domains,
     )
     nodes.append(info)
+
+    region_engine.register(node_id, latitude, longitude, region)
+
+    moe_coordinator.register_expert(ExpertInfo(
+        node_id=node_id,
+        models=models,
+        domains=domains,
+        compute_score=compute_score,
+        vram_mb=vram_mb,
+    ))
+
     return info
 
 
@@ -122,11 +227,36 @@ async def register_node(payload: Dict[str, Any]) -> JSONResponse:
     region = payload.get("region", "LAN")
     models = payload.get("models") or []
     metadata = payload.get("metadata") or {}
+    latitude = float(payload.get("latitude", 0.0))
+    longitude = float(payload.get("longitude", 0.0))
+    vram_mb = int(payload.get("vram_mb", 0))
+    ram_mb = int(payload.get("ram_mb", 0))
+    compute_score = float(payload.get("compute_score", 0.0))
+    engine_type = payload.get("engine_type", "ollama")
+    draft_models = payload.get("draft_models") or []
+    expert_domains = payload.get("expert_domains") or ["general"]
 
     if not node_id or not host or not port:
-        raise HTTPException(status_code=400, detail="node_id, host, and port are required")
+        raise HTTPException(
+            status_code=400, detail="node_id, host, and port are required"
+        )
 
-    _upsert_node(node_id, host, int(port), region, models, metadata)
+    _upsert_node(
+        node_id,
+        host,
+        int(port),
+        region,
+        models,
+        metadata,
+        latitude=latitude,
+        longitude=longitude,
+        vram_mb=vram_mb,
+        ram_mb=ram_mb,
+        compute_score=compute_score,
+        engine_type=engine_type,
+        draft_models=draft_models,
+        expert_domains=expert_domains,
+    )
     return JSONResponse({"status": "ok"})
 
 
@@ -146,31 +276,103 @@ async def node_websocket(ws: WebSocket) -> None:
         region = reg.get("region", "LAN")
         models = reg.get("models", [])
         metadata = reg.get("metadata", {})
+        latitude = float(reg.get("latitude", 0.0))
+        longitude = float(reg.get("longitude", 0.0))
+        vram_mb = int(reg.get("vram_mb", 0))
+        ram_mb = int(reg.get("ram_mb", 0))
+        compute_score = float(reg.get("compute_score", 0.0))
+        engine_type = reg.get("engine_type", "ollama")
+        draft_models = reg.get("draft_models", [])
+        expert_domains = reg.get("expert_domains", ["general"])
 
-        _upsert_node(node_id, "ws-connected", 0, region, models, metadata, is_ws=True)
+        _upsert_node(
+            node_id,
+            "ws-connected",
+            0,
+            region,
+            models,
+            metadata,
+            is_ws=True,
+            latitude=latitude,
+            longitude=longitude,
+            vram_mb=vram_mb,
+            ram_mb=ram_mb,
+            compute_score=compute_score,
+            engine_type=engine_type,
+            draft_models=draft_models,
+            expert_domains=expert_domains,
+        )
         _ws_connections[node_id] = ws
         _ws_locks[node_id] = asyncio.Lock()
-        print(f"[ws] Node connected: {node_id} (region={region}, models={models})")
+        print(
+            f"[ws] Expert connected: {node_id} (region={region}, "
+            f"domains={expert_domains}, models={models}, vram={vram_mb}MB)"
+        )
         await ws.send_json({"type": "registered", "node_id": node_id})
 
         while True:
             msg = await ws.receive_json()
             msg_type = msg.get("type")
+
             if msg_type == "chunk":
                 task_id = msg.get("task_id")
                 q = _task_queues.get(task_id)
                 if q:
                     await q.put(msg.get("data", ""))
+
             elif msg_type == "done":
                 task_id = msg.get("task_id")
                 q = _task_queues.get(task_id)
                 if q:
                     await q.put(None)
+
             elif msg_type == "pong":
                 for n in nodes:
                     if n.node_id == node_id:
                         n.last_heartbeat = time.time()
                         break
+
+            elif msg_type == "peer_measurement":
+                target = msg.get("target_node_id", "")
+                rtt = msg.get("rtt_ms", -1.0)
+                if rtt >= 0:
+                    topology_manager.update(node_id, target, rtt)
+
+            elif msg_type == "draft_result":
+                task_id = msg.get("task_id")
+                q = _task_queues.get(task_id)
+                if q:
+                    await q.put(msg)
+
+            elif msg_type == "verify_result":
+                task_id = msg.get("task_id")
+                q = _task_queues.get(task_id)
+                if q:
+                    await q.put(msg)
+
+            elif msg_type == "pipeline_token":
+                task_id = msg.get("task_id")
+                q = _task_queues.get(task_id)
+                if q:
+                    await q.put(msg)
+
+            elif msg_type == "pipeline_done":
+                task_id = msg.get("task_id")
+                q = _task_queues.get(task_id)
+                if q:
+                    await q.put(None)
+
+            elif msg_type == "moe_expert_chunk":
+                task_id = msg.get("task_id")
+                q = _task_queues.get(task_id)
+                if q:
+                    await q.put(msg.get("data", ""))
+
+            elif msg_type == "moe_expert_done":
+                task_id = msg.get("task_id")
+                q = _task_queues.get(task_id)
+                if q:
+                    await q.put(None)
 
     except WebSocketDisconnect:
         pass
@@ -181,7 +383,11 @@ async def node_websocket(ws: WebSocket) -> None:
             _ws_connections.pop(node_id, None)
             _ws_locks.pop(node_id, None)
             nodes = deque(n for n in nodes if n.node_id != node_id)
-            print(f"[ws] Node disconnected: {node_id}")
+            latency_tracker.remove(node_id)
+            topology_manager.remove_node(node_id)
+            region_engine.remove(node_id)
+            moe_coordinator.remove_expert(node_id)
+            print(f"[ws] Expert disconnected: {node_id}")
 
 
 @app.get("/nodes")
@@ -196,15 +402,334 @@ async def list_nodes() -> List[Dict[str, Any]]:
             "metadata": n.metadata,
             "online": n.last_latency_ms >= 0,
             "last_latency_ms": n.last_latency_ms,
+            "ewma_ms": round(latency_tracker.ewma(n.node_id), 2),
+            "jitter_ms": round(latency_tracker.jitter(n.node_id), 2),
+            "score": round(latency_tracker.score(n.node_id), 2),
             "connection": "ws" if n.is_ws else "http",
+            "latitude": n.latitude,
+            "longitude": n.longitude,
+            "vram_mb": n.vram_mb,
+            "ram_mb": n.ram_mb,
+            "compute_score": round(n.compute_score, 1),
+            "engine_type": n.engine_type,
+            "draft_models": n.draft_models,
+            "expert_domains": n.expert_domains,
         }
         for n in nodes
     ]
 
 
+@app.get("/experts")
+async def list_experts() -> List[Dict[str, Any]]:
+    """List all registered MoE experts with their scores."""
+    result = []
+    for expert in moe_coordinator.all_experts():
+        result.append({
+            "node_id": expert.node_id,
+            "models": expert.models,
+            "domains": expert.domains,
+            "compute_score": round(expert.compute_score, 1),
+            "vram_mb": expert.vram_mb,
+            "latency_ms": round(latency_tracker.ewma(expert.node_id), 2),
+        })
+    return result
+
+
+@app.post("/experts/route")
+async def route_preview(payload: Dict[str, Any]) -> JSONResponse:
+    """Preview which experts would be selected for a prompt (dry-run)."""
+    prompt = payload.get("prompt", "")
+    model = payload.get("model")
+    region = payload.get("region")
+    k = payload.get("k")
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+
+    experts = moe_coordinator.all_experts()
+    online_ids = [n.node_id for n in nodes if n.last_latency_ms >= 0]
+    if k is None:
+        k = expert_router.adaptive_k(prompt, len(online_ids))
+    selected = expert_router.select_experts(prompt, experts, online_ids, k=k, region=region, model=model)
+    domains = classify_prompt(prompt)
+    return JSONResponse({
+        "prompt_domains": domains,
+        "selected_experts": [
+            {"node_id": nid, "weight": round(w, 3)} for nid, w in selected
+        ],
+        "k": k,
+    })
+
+
+@app.get("/speculative/stats")
+async def speculative_stats() -> Dict[str, Any]:
+    return speculative_decoder.stats.to_dict()
+
+
+def choose_node(
+    region: Optional[str], model: Optional[str] = None
+) -> Optional[NodeInfo]:
+    """Latency-ranked node selection, with region and model filtering."""
+    candidates = [n for n in nodes if n.last_latency_ms >= 0]
+
+    if region:
+        regional = [n for n in candidates if n.region == region]
+        if regional:
+            candidates = regional
+
+    if model:
+        with_model = [n for n in candidates if model in n.models]
+        if with_model:
+            candidates = with_model
+
+    if not candidates:
+        return None
+
+    return min(candidates, key=lambda n: latency_tracker.score(n.node_id))
+
+
+def choose_draft_node(region: Optional[str]) -> Optional[NodeInfo]:
+    """Find the lowest-latency node that has a draft (small) model available."""
+    candidates = [
+        n
+        for n in nodes
+        if n.last_latency_ms >= 0 and len(n.draft_models) > 0
+    ]
+    if region:
+        regional = [n for n in candidates if n.region == region]
+        if regional:
+            candidates = regional
+    if not candidates:
+        return None
+    return min(candidates, key=lambda n: latency_tracker.score(n.node_id))
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
-    # Simple UI that shows node status and a chat box
+    return _build_dashboard_html()
+
+
+@app.get("/chat-ui", response_class=HTMLResponse)
+async def chat_ui() -> str:
+    return _build_chat_ui_html()
+
+
+@app.post("/chat")
+async def chat(request: Request) -> StreamingResponse:
+    """MoE-first chat routing.
+
+    Tier 1: MoE dispatch (2+ online experts) -- parallel expert query
+    Tier 2: Single-node fallback (1 expert)  -- direct generation
+    """
+    payload = await request.json()
+    prompt: str = payload.get("prompt", "")
+    region: Optional[str] = payload.get("region")
+    model: Optional[str] = payload.get("model")
+    strategy_str: str = payload.get("strategy", "fastest")
+    k_override: Optional[int] = payload.get("k")
+
+    try:
+        strategy = AggregationStrategy(strategy_str)
+    except ValueError:
+        strategy = AggregationStrategy.FASTEST
+
+    experts = moe_coordinator.all_experts()
+    online_ids = [n.node_id for n in nodes if n.last_latency_ms >= 0]
+
+    k = k_override or expert_router.adaptive_k(prompt, len(online_ids))
+    selected = expert_router.select_experts(
+        prompt, experts, online_ids, k=k, region=region, model=model
+    )
+
+    if len(selected) >= 1:
+        async def moe_stream():
+            async for chunk in moe_coordinator.dispatch(
+                prompt=prompt,
+                model=model,
+                selected_experts=selected,
+                strategy=strategy,
+                ws_connections=_ws_connections,
+                ws_locks=_ws_locks,
+                task_queues=_task_queues,
+            ):
+                yield chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+
+        return StreamingResponse(
+            moe_stream(), media_type="application/octet-stream"
+        )
+
+    node = choose_node(region, model)
+    if not node:
+        raise HTTPException(
+            status_code=503, detail="No experts are currently registered"
+        )
+
+    if node.is_ws and node.node_id in _ws_connections:
+        return await _chat_via_ws(node, prompt, model)
+    else:
+        return _chat_via_http(node, prompt, model)
+
+
+def _chat_via_http(
+    node: NodeInfo, prompt: str, model: Optional[str]
+) -> StreamingResponse:
+    infer_payload: Dict[str, Any] = {"prompt": prompt}
+    if model:
+        infer_payload["model"] = model
+
+    async def stream_from_node():
+        route_header = json.dumps(
+            {
+                "route": {
+                    "node_id": node.node_id,
+                    "host": node.host,
+                    "port": node.port,
+                    "model": model or "",
+                    "mode": "single-node-http",
+                    "latency_ms": round(
+                        latency_tracker.ewma(node.node_id), 1
+                    ),
+                }
+            }
+        )
+        yield (route_header + "\n").encode("utf-8")
+
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "POST", f"{node.base_url}/infer", json=infer_payload
+            ) as resp:
+                if resp.status_code != 200:
+                    text = await resp.aread()
+                    yield text
+                    return
+                async for chunk in resp.aiter_bytes():
+                    if chunk:
+                        yield chunk
+
+    return StreamingResponse(
+        stream_from_node(), media_type="application/octet-stream"
+    )
+
+
+async def _chat_via_ws(
+    node: NodeInfo, prompt: str, model: Optional[str]
+) -> StreamingResponse:
+    ws = _ws_connections.get(node.node_id)
+    lock = _ws_locks.get(node.node_id)
+    if not ws or not lock:
+        raise HTTPException(status_code=503, detail="Node disconnected")
+
+    task_id = uuid.uuid4().hex
+    queue: asyncio.Queue = asyncio.Queue()
+    _task_queues[task_id] = queue
+
+    try:
+        async with lock:
+            await ws.send_json(
+                {
+                    "type": "task",
+                    "task_id": task_id,
+                    "prompt": prompt,
+                    "model": model or "",
+                }
+            )
+    except Exception:
+        _task_queues.pop(task_id, None)
+        raise HTTPException(status_code=503, detail="Failed to reach node")
+
+    async def stream_from_ws():
+        route_header = json.dumps(
+            {
+                "route": {
+                    "node_id": node.node_id,
+                    "host": node.host,
+                    "port": node.port,
+                    "model": model or "",
+                    "mode": "single-node-ws",
+                    "latency_ms": round(
+                        latency_tracker.ewma(node.node_id), 1
+                    ),
+                }
+            }
+        )
+        yield (route_header + "\n").encode("utf-8")
+
+        try:
+            while True:
+                chunk = await asyncio.wait_for(queue.get(), timeout=120.0)
+                if chunk is None:
+                    break
+                if isinstance(chunk, str):
+                    yield chunk.encode("utf-8")
+                else:
+                    yield chunk
+        except asyncio.TimeoutError:
+            yield b'{"error":"node timeout"}'
+        finally:
+            _task_queues.pop(task_id, None)
+
+    return StreamingResponse(
+        stream_from_ws(), media_type="application/octet-stream"
+    )
+
+
+@app.post("/nodes/health")
+async def health_check_nodes() -> JSONResponse:
+    async with httpx.AsyncClient() as client:
+        for node in list(nodes):
+            if node.is_ws:
+                ws = _ws_connections.get(node.node_id)
+                lock = _ws_locks.get(node.node_id)
+                if ws and lock:
+                    try:
+                        start = time.perf_counter()
+                        async with lock:
+                            await ws.send_json({"type": "ping"})
+                        rtt = (time.perf_counter() - start) * 1000.0
+                        node.last_heartbeat = time.time()
+                        node.last_latency_ms = rtt
+                        latency_tracker.record(node.node_id, rtt)
+                    except Exception:
+                        node.last_latency_ms = -1.0
+                        latency_tracker.record_failure(node.node_id)
+                else:
+                    node.last_latency_ms = -1.0
+            else:
+                start = time.perf_counter()
+                try:
+                    resp = await client.get(
+                        f"{node.base_url}/health", timeout=2.0
+                    )
+                    if resp.status_code == 200:
+                        rtt = (time.perf_counter() - start) * 1000.0
+                        node.last_heartbeat = time.time()
+                        node.last_latency_ms = rtt
+                        latency_tracker.record(node.node_id, rtt)
+                    else:
+                        node.last_latency_ms = -1.0
+                        latency_tracker.record_failure(node.node_id)
+                except Exception:
+                    node.last_latency_ms = -1.0
+                    latency_tracker.record_failure(node.node_id)
+
+    return JSONResponse({"status": "ok", "count": len(nodes)})
+
+
+@app.get("/health")
+async def gateway_health() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "version": __version__,
+        "nodes": len(nodes),
+        "experts": len(moe_coordinator.all_experts()),
+        "moe_stats": moe_coordinator.stats.to_dict(),
+    }
+
+
+# ──────────────────────────────────────────────────
+#  Dashboard HTML
+# ──────────────────────────────────────────────────
+
+def _build_dashboard_html() -> str:
     return """
 <!DOCTYPE html>
 <html lang="en">
@@ -215,16 +740,17 @@ async def index() -> str:
     body { font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; padding: 0; background: #050816; color: #e5e7eb; }
     header { padding: 1rem 1.5rem; background: #020617; border-bottom: 1px solid #1f2937; display: flex; justify-content: space-between; align-items: center; }
     h1 { font-size: 1.1rem; margin: 0; }
-    main { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 1.5rem; padding: 1.5rem; }
+    main { display: grid; grid-template-columns: 1fr; gap: 1.5rem; padding: 1.5rem; }
     section { background: #020617; border-radius: 0.75rem; border: 1px solid #1f2937; padding: 1rem 1.25rem; }
     h2 { font-size: 0.95rem; margin: 0 0 0.75rem 0; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.08em; }
     table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
     th, td { padding: 0.35rem 0.5rem; text-align: left; }
     th { color: #9ca3af; border-bottom: 1px solid #1f2937; font-weight: 500; }
     tr:nth-child(even) { background: rgba(15,23,42,0.5); }
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 0.78rem; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.78rem; }
     .badge { display: inline-flex; align-items: center; padding: 0.1rem 0.4rem; border-radius: 999px; font-size: 0.7rem; border: 1px solid #1f2937; background: #020617; color: #e5e7eb; }
     .badge.green { border-color: #15803d; color: #bbf7d0; }
+    .badge.orange { border-color: #c2410c; color: #fed7aa; }
     .chat-input { width: 100%; padding: 0.5rem 0.6rem; border-radius: 0.5rem; border: 1px solid #1f2937; background: #020617; color: #e5e7eb; font-size: 0.85rem; }
     .chat-input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 1px #1d4ed8; }
     .btn { cursor: pointer; border: none; padding: 0.45rem 0.9rem; border-radius: 999px; font-size: 0.8rem; font-weight: 500; background: #2563eb; color: white; display: inline-flex; align-items: center; gap: 0.3rem; }
@@ -239,46 +765,64 @@ async def index() -> str:
     .status-dot { width: 8px; height: 8px; border-radius: 999px; margin-right: 0.3rem; display: inline-block; background: #22c55e; }
     .status-dot.offline { background: #ef4444; }
     .latency { font-size: 0.7rem; color: #6b7280; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+    .stat-card { background: #0f1629; border: 1px solid #1f2937; border-radius: 0.5rem; padding: 0.75rem; }
+    .stat-val { font-size: 1.4rem; font-weight: 600; color: #f97316; }
+    .stat-label { font-size: 0.7rem; color: #6b7280; margin-top: 0.2rem; }
+    .pipeline-stage { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.2rem 0.5rem; border: 1px solid #1f2937; border-radius: 0.4rem; font-size: 0.72rem; background: #0f1629; margin: 0.15rem; }
+    .pipeline-arrow { color: #f97316; font-weight: bold; margin: 0 0.15rem; }
   </style>
 </head>
 <body>
   <header>
     <div>
-      <h1>Microwave AI – Phase 0 Control Plane</h1>
-      <div class="small">Gateway dashboard · LAN prototype</div>
+      <h1>Microwave AI – Distributed Inference Dashboard</h1>
+      <div class="small">Gateway v0.3.0 &middot; Mixture of Experts &middot; Parallel Dispatch</div>
     </div>
     <div class="small">
       <span class="pill" id="gatewayStatus"><span class="status-dot"></span>Gateway online</span>
     </div>
   </header>
   <main>
+    <div class="grid-2">
+      <div class="stat-card"><div class="stat-val" id="nodeCount">0</div><div class="stat-label">Online Experts</div></div>
+      <div class="stat-card"><div class="stat-val" id="moeRequests">0</div><div class="stat-label">MoE Requests</div></div>
+      <div class="stat-card"><div class="stat-val" id="avgExperts">--</div><div class="stat-label">Avg Experts/Request</div></div>
+      <div class="stat-card"><div class="stat-val" id="avgLatency">--</div><div class="stat-label">Avg Response (ms)</div></div>
+    </div>
+
     <section>
-      <h2>Nodes</h2>
-      <div class="small" style="margin-bottom: 0.4rem;">Registered nodes exposed via <code>POST /nodes/register</code>.</div>
+      <h2>Nodes (Latency-Ranked)</h2>
       <table>
         <thead>
           <tr>
-            <th>ID</th>
-            <th>Host</th>
-            <th>Region</th>
-            <th>Models</th>
-            <th>Status</th>
+            <th>ID</th><th>Region</th><th>Domains</th><th>Models</th>
+            <th>VRAM</th><th>EWMA</th><th>Jitter</th><th>Score</th><th>Status</th>
           </tr>
         </thead>
         <tbody id="nodesTableBody">
-          <tr><td colspan="4" class="small">Loading nodes…</td></tr>
+          <tr><td colspan="9" class="small">Loading nodes...</td></tr>
         </tbody>
       </table>
-      <div class="row" style="margin-top: 0.8rem;">
-        <button class="btn-secondary btn" type="button" onclick="refreshNodes()">Refresh</button>
-        <button class="btn-secondary btn" type="button" onclick="pingNodes()">Ping</button>
+      <div class="row">
+        <button class="btn-secondary btn" onclick="refreshNodes()">Refresh</button>
+        <button class="btn-secondary btn" onclick="pingNodes()">Ping</button>
         <span class="small" id="nodesMeta"></span>
       </div>
     </section>
+
+    <section>
+      <h2>Expert Registry</h2>
+      <div id="expertsContainer" class="small">No experts registered.</div>
+      <div class="row">
+        <button class="btn-secondary btn" onclick="refreshExperts()">Refresh</button>
+      </div>
+    </section>
+
     <section>
       <h2>Chat</h2>
       <div class="label">Prompt</div>
-      <textarea id="promptInput" placeholder="Ask Microwave AI anything…"></textarea>
+      <textarea id="promptInput" placeholder="Ask Microwave AI anything..."></textarea>
       <div class="row">
         <div style="flex: 1;">
           <div class="label">Region</div>
@@ -290,13 +834,11 @@ async def index() -> str:
         </div>
       </div>
       <div class="row">
-        <button class="btn" type="button" id="sendBtn" onclick="sendChat()">
-          <span>Send</span>
-        </button>
+        <button class="btn" id="sendBtn" onclick="sendChat()">Send</button>
         <span class="small" id="chatStatus"></span>
       </div>
-      <div class="label" style="margin-top: 0.9rem;">Conversation</div>
-      <div id="chatWindow" style="border-radius:0.5rem;border:1px solid #1f2937;background:#020617;padding:0.6rem;max-height:260px;overflow-y:auto;">
+      <div class="label" style="margin-top: 0.9rem;">Response</div>
+      <div id="chatWindow" style="border-radius:0.5rem;border:1px solid #1f2937;background:#020617;padding:0.6rem;max-height:260px;overflow-y:auto;white-space:pre-wrap;">
         <div class="small" style="color:#6b7280;">Messages will appear here.</div>
       </div>
     </section>
@@ -305,181 +847,147 @@ async def index() -> str:
     async function refreshNodes() {
       const body = document.getElementById('nodesTableBody');
       const meta = document.getElementById('nodesMeta');
-      meta.textContent = 'Refreshing…';
       try {
         const res = await fetch('/nodes');
         const data = await res.json();
-        if (!Array.isArray(data) || data.length === 0) {
-          body.innerHTML = '<tr><td colspan="4" class="small">No nodes registered.</td></tr>';
-          meta.textContent = '0 nodes';
+        document.getElementById('nodeCount').textContent = data.filter(n => n.online).length;
+        if (!data.length) {
+          body.innerHTML = '<tr><td colspan="9" class="small">No experts.</td></tr>';
+          meta.textContent = '0 experts';
           return;
         }
+        data.sort((a, b) => a.score - b.score);
         body.innerHTML = '';
         for (const n of data) {
           const tr = document.createElement('tr');
           tr.innerHTML = `
             <td><code>${n.node_id}</code></td>
-            <td><code>${n.host}:${n.port}</code></td>
-            <td>${n.region}</td>
+            <td>${n.region} ${n.latitude ? '(' + n.latitude.toFixed(1) + ',' + n.longitude.toFixed(1) + ')' : ''}</td>
+            <td>${(n.expert_domains || ['general']).map(d => '<span class="badge">' + d + '</span>').join(' ')}</td>
             <td>${(n.models || []).map(m => '<span class="badge">' + m + '</span>').join(' ')}</td>
+            <td>${n.vram_mb ? n.vram_mb + ' MB' : '--'}</td>
+            <td>${n.ewma_ms >= 0 ? n.ewma_ms.toFixed(1) + ' ms' : '--'}</td>
+            <td>${n.jitter_ms >= 0 ? n.jitter_ms.toFixed(1) + ' ms' : '--'}</td>
+            <td><strong>${n.score < 99999 ? n.score.toFixed(1) : 'inf'}</strong></td>
             <td>
               <span class="badge ${n.online ? 'green' : ''}">
                 <span class="status-dot ${n.online ? '' : 'offline'}"></span>
-                ${n.online ? 'Online' : 'Unknown'}
+                ${n.online ? 'Online' : 'Offline'}
               </span>
-              ${typeof n.last_latency_ms === 'number' && n.last_latency_ms >= 0
-                ? '<div class="latency">' + n.last_latency_ms.toFixed(1) + ' ms</div>'
-                : ''}
             </td>
           `;
           body.appendChild(tr);
         }
-        meta.textContent = data.length + ' node' + (data.length === 1 ? '' : 's');
+        meta.textContent = data.length + ' expert' + (data.length === 1 ? '' : 's');
       } catch (e) {
-        body.innerHTML = '<tr><td colspan="4" class="small">Error loading nodes.</td></tr>';
-        meta.textContent = 'Error';
+        body.innerHTML = '<tr><td colspan="9" class="small">Error loading.</td></tr>';
       }
+    }
+
+    async function refreshExperts() {
+      const container = document.getElementById('expertsContainer');
+      try {
+        const res = await fetch('/experts');
+        const data = await res.json();
+        if (!data.length) {
+          container.textContent = 'No experts registered.';
+          return;
+        }
+        container.innerHTML = '';
+        for (const e of data) {
+          const div = document.createElement('div');
+          div.style.marginBottom = '0.5rem';
+          const domains = (e.domains || []).map(d =>
+            '<span class="pipeline-stage">' + d + '</span>'
+          ).join(' ');
+          div.innerHTML = '<div><code>' + e.node_id + '</code> &middot; ' + (e.models||[]).join(', ') + ' &middot; <strong>' + e.latency_ms.toFixed(1) + ' ms</strong></div><div style="margin-top:0.2rem;">' + domains + '</div>';
+          container.appendChild(div);
+        }
+      } catch (e) {
+        container.textContent = 'Error loading experts.';
+      }
+    }
+
+    async function refreshMoEStats() {
+      try {
+        const res = await fetch('/health');
+        const s = await res.json();
+        const m = s.moe_stats || {};
+        document.getElementById('moeRequests').textContent = m.total_requests || 0;
+        document.getElementById('avgExperts').textContent =
+          m.total_requests > 0 ? m.avg_experts_per_request.toFixed(1) : '--';
+        document.getElementById('avgLatency').textContent =
+          m.total_requests > 0 ? m.avg_response_ms.toFixed(0) : '--';
+      } catch (e) {}
     }
 
     async function pingNodes() {
-      const meta = document.getElementById('nodesMeta');
-      meta.textContent = 'Pinging…';
-      try {
-        await fetch('/nodes/health', { method: 'POST' });
-      } catch (e) {
-        meta.textContent = 'Ping error';
-        return;
-      }
+      document.getElementById('nodesMeta').textContent = 'Pinging...';
+      try { await fetch('/nodes/health', { method: 'POST' }); } catch (e) {}
       await refreshNodes();
-      meta.textContent += ' · health updated';
     }
 
     async function sendChat() {
-      const promptEl = document.getElementById('promptInput');
-      const regionEl = document.getElementById('regionInput');
-      const modelEl = document.getElementById('modelInput');
+      const prompt = document.getElementById('promptInput').value.trim();
+      if (!prompt) return;
       const chatWindow = document.getElementById('chatWindow');
-      const statusEl = document.getElementById('chatStatus');
+      const status = document.getElementById('chatStatus');
       const btn = document.getElementById('sendBtn');
-
-      const prompt = promptEl.value.trim();
-      if (!prompt) {
-        statusEl.textContent = 'Enter a prompt first.';
-        return;
-      }
-      // create user bubble
-      const userBubble = document.createElement('div');
-      userBubble.className = 'small';
-      userBubble.style.marginBottom = '0.4rem';
-      userBubble.innerHTML = '<div style="text-align:right;"><span class="badge" style="background:#1f2937;">You</span></div><div style="margin-top:0.15rem;text-align:right;">' + prompt.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>';
-      chatWindow.appendChild(userBubble);
-
-      // create assistant bubble we will stream into
-      const botBubble = document.createElement('div');
-      botBubble.className = 'small';
-      botBubble.style.marginBottom = '0.8rem';
-      botBubble.innerHTML = '<div><span class="badge green">Microwave AI</span> <span id="routeInfo" class="latency"></span></div><div id="botText" style="margin-top:0.15rem;white-space:pre-wrap;"></div>';
-      chatWindow.appendChild(botBubble);
-      const botTextEl = botBubble.querySelector('#botText');
-      const routeInfoEl = botBubble.querySelector('#routeInfo');
-
-      chatWindow.scrollTop = chatWindow.scrollHeight;
-      statusEl.textContent = 'Sending…';
+      chatWindow.textContent = '';
+      status.textContent = 'Routing to experts...';
       btn.disabled = true;
-
       try {
         const res = await fetch('/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             prompt,
-            region: regionEl.value || null,
-            model: modelEl.value || null,
+            region: document.getElementById('regionInput').value || null,
+            model: document.getElementById('modelInput').value || null,
+            strategy: 'fastest',
           }),
         });
-        if (!res.ok || !res.body) {
-          statusEl.textContent = 'Error: ' + res.status;
-          btn.disabled = false;
-          return;
-        }
-
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
-
-        let buffer = '';
-        let fullText = '';
-        let done = false;
-        while (!done) {
-          const result = await reader.read();
-          done = result.done;
-          if (result.value) {
-            const chunk = decoder.decode(result.value, { stream: !done });
-            buffer += chunk;
-
-            // Ollama streams JSON lines; split on newlines and parse each
-            const lines = buffer.split('\\n');
-            buffer = lines.pop(); // keep last partial line
-            for (const line of lines) {
-              if (!line.trim()) continue;
-              try {
-                const obj = JSON.parse(line);
-                // Optional routing info header
-                if (obj.route && routeInfoEl && !routeInfoEl.textContent) {
-                  routeInfoEl.textContent = `· ${obj.route.node_id} (${obj.route.host}:${obj.route.port}, ${obj.route.model || 'model'})`;
-                }
-                if (typeof obj.response === 'string') {
-                  fullText += obj.response;
-                  botTextEl.textContent = fullText;
-                  chatWindow.scrollTop = chatWindow.scrollHeight;
-                }
-              } catch (e) {
-                // Fallback: treat as plain text if not JSON
-                fullText += line;
-                botTextEl.textContent = fullText;
-                chatWindow.scrollTop = chatWindow.scrollHeight;
+        let buf = '', full = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split('\\n');
+          buf = lines.pop();
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const obj = JSON.parse(line);
+              if (obj.response) { full += obj.response; chatWindow.textContent = full; }
+              if (obj.route) {
+                const experts = (obj.route.experts || []).map(e => e.node_id).join(', ');
+                status.textContent = 'MoE (' + obj.route.strategy + ') via ' + experts;
               }
-            }
+            } catch (e) { full += line; chatWindow.textContent = full; }
           }
         }
-        if (buffer.trim()) {
-          try {
-            const obj = JSON.parse(buffer);
-            if (typeof obj.response === 'string') {
-              fullText += obj.response;
-              botTextEl.textContent = fullText;
-            }
-          } catch (e) {
-            fullText += buffer;
-            botTextEl.textContent = fullText;
-          }
-        }
-        statusEl.textContent = 'Done.';
-      } catch (e) {
-        statusEl.textContent = 'Error: ' + (e && e.message ? e.message : 'unknown');
-      } finally {
-        btn.disabled = false;
-      }
+        status.textContent = 'Done.';
+      } catch (e) { status.textContent = 'Error: ' + e.message; }
+      finally { btn.disabled = false; }
     }
 
-    // Allow Enter to send, Shift+Enter for newline
-    document.getElementById('promptInput').addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendChat();
-      }
+    document.getElementById('promptInput').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
     });
 
-    // Initial load
     refreshNodes();
+    refreshExperts();
+    refreshMoEStats();
+    setInterval(() => { refreshNodes(); refreshExperts(); refreshMoEStats(); }, 10000);
   </script>
 </body>
 </html>
     """
 
 
-
-@app.get("/chat-ui", response_class=HTMLResponse)
-async def chat_ui() -> str:
+def _build_chat_ui_html() -> str:
     return r"""
 <!DOCTYPE html>
 <html lang="en">
@@ -521,29 +1029,19 @@ async def chat_ui() -> str:
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
     #sidebar {
-      width: 250px;
-      min-width: 250px;
+      width: 250px; min-width: 250px;
       background: linear-gradient(180deg, #10131d, #0d1018);
-      display: flex;
-      flex-direction: column;
+      display: flex; flex-direction: column;
       padding: 1rem 0.65rem 0.65rem;
       border-right: 1px solid var(--line);
       gap: 0.45rem;
     }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 0.55rem;
-      padding: 0 0.45rem 0.35rem;
-    }
+    .brand { display: flex; align-items: center; gap: 0.55rem; padding: 0 0.45rem 0.35rem; }
     .brand-icon {
-      width: 30px;
-      height: 30px;
-      border-radius: 9px;
+      width: 30px; height: 30px; border-radius: 9px;
       border: 1px solid rgba(251, 146, 60, 0.6);
       background: linear-gradient(160deg, #2f364d, #171b2a);
-      display: grid;
-      place-items: center;
+      display: grid; place-items: center;
       box-shadow: 0 0 16px rgba(251, 146, 60, 0.22);
       font-size: 0.95rem;
     }
@@ -551,364 +1049,85 @@ async def chat_ui() -> str:
     .brand p { font-size: 0.72rem; color: var(--text-2); line-height: 1.2; }
 
     #newChatBtn {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.62rem 0.7rem;
-      border-radius: 0.72rem;
-      cursor: pointer;
-      font-size: 0.84rem;
-      color: var(--text-0);
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.62rem 0.7rem; border-radius: 0.72rem; cursor: pointer;
+      font-size: 0.84rem; color: var(--text-0);
       background: linear-gradient(135deg, rgba(249, 115, 22, 0.18), rgba(249, 115, 22, 0.08));
-      border: 1px solid rgba(251, 146, 60, 0.3);
-      width: 100%;
-      text-align: left;
+      border: 1px solid rgba(251, 146, 60, 0.3); width: 100%; text-align: left;
     }
-    #newChatBtn:hover {
-      border-color: rgba(251, 146, 60, 0.6);
-      box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
-    }
-    #newChatBtn svg { flex-shrink: 0; }
+    #newChatBtn:hover { border-color: rgba(251, 146, 60, 0.6); box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12); }
 
-    .history-label {
-      font-size: 0.66rem;
-      color: var(--text-3);
-      text-transform: uppercase;
-      letter-spacing: 0.09em;
-      padding: 0.58rem 0.6rem 0.12rem;
-    }
-    .history-item {
-      padding: 0.5rem 0.62rem;
-      border-radius: 0.65rem;
-      font-size: 0.82rem;
-      color: var(--text-2);
-      cursor: pointer;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      border: 1px solid transparent;
-    }
-    .history-item:hover {
-      background: #171b27;
-      color: var(--text-0);
-      border-color: rgba(148, 163, 184, 0.2);
-    }
-    .history-item.active {
-      background: #202638;
-      color: var(--text-0);
-      border-color: rgba(251, 146, 60, 0.4);
-    }
-    #historyList {
-      overflow-y: auto;
-      padding-bottom: 0.3rem;
-    }
+    .history-label { font-size: 0.66rem; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.09em; padding: 0.58rem 0.6rem 0.12rem; }
+    .history-item { padding: 0.5rem 0.62rem; border-radius: 0.65rem; font-size: 0.82rem; color: var(--text-2); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border: 1px solid transparent; }
+    .history-item:hover { background: #171b27; color: var(--text-0); border-color: rgba(148, 163, 184, 0.2); }
+    .history-item.active { background: #202638; color: var(--text-0); border-color: rgba(251, 146, 60, 0.4); }
+    #historyList { overflow-y: auto; padding-bottom: 0.3rem; }
 
-    #chatArea {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
+    #chatArea { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
     #topBar {
       border-bottom: 1px solid var(--line);
       background: linear-gradient(180deg, rgba(24, 27, 40, 0.94), rgba(24, 27, 40, 0.68));
-      padding: 0.7rem 1.2rem;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 0.8rem;
+      padding: 0.7rem 1.2rem; display: flex; align-items: center; justify-content: space-between; gap: 0.8rem;
     }
-    .top-title {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 0.86rem;
-      color: var(--text-1);
-    }
-    .dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 999px;
-      display: inline-block;
-      box-shadow: 0 0 10px rgba(52, 211, 153, 0.45);
-      background: var(--good);
-    }
+    .top-title { display: flex; align-items: center; gap: 0.5rem; font-size: 0.86rem; color: var(--text-1); }
+    .dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; box-shadow: 0 0 10px rgba(52, 211, 153, 0.45); background: var(--good); }
     .pill-row { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
-    .pill {
-      border: 1px solid var(--line);
-      background: rgba(19, 21, 32, 0.9);
-      color: var(--text-2);
-      border-radius: 999px;
-      padding: 0.2rem 0.52rem;
-      font-size: 0.71rem;
-    }
+    .pill { border: 1px solid var(--line); background: rgba(19, 21, 32, 0.9); color: var(--text-2); border-radius: 999px; padding: 0.2rem 0.52rem; font-size: 0.71rem; }
     #activeModelTag { color: #fed7aa; border-color: rgba(251, 146, 60, 0.35); }
 
-    #messages {
-      flex: 1;
-      overflow-y: auto;
-      padding: 1.1rem 0 1.6rem;
-      display: flex;
-      flex-direction: column;
-      gap: 1.1rem;
-    }
-    #messages::-webkit-scrollbar { width: 6px; }
-    #messages::-webkit-scrollbar-track { background: transparent; }
-    #messages::-webkit-scrollbar-thumb { background: #2d3447; border-radius: 6px; }
-
-    .msg-row {
-      display: flex;
-      flex-direction: column;
-      padding: 0 9%;
-    }
+    #messages { flex: 1; overflow-y: auto; padding: 1.1rem 0 1.6rem; display: flex; flex-direction: column; gap: 1.1rem; }
+    .msg-row { display: flex; flex-direction: column; padding: 0 9%; }
     .msg-row.user { align-items: flex-end; }
     .msg-row.bot  { align-items: flex-start; }
-
-    .meta {
-      margin-bottom: 0.28rem;
-      font-size: 0.68rem;
-      color: var(--text-3);
-      display: flex;
-      align-items: center;
-      gap: 0.4rem;
-    }
+    .meta { margin-bottom: 0.28rem; font-size: 0.68rem; color: var(--text-3); display: flex; align-items: center; gap: 0.4rem; }
     .meta .who { color: var(--text-2); }
-
-    .bubble {
-      max-width: min(780px, 78%);
-      font-size: 0.92rem;
-      line-height: 1.58;
-    }
-    .msg-row.user .bubble {
-      background: linear-gradient(165deg, #343b53, #282d42);
-      border: 1px solid #3a4462;
-      border-radius: 1rem 1rem 0.22rem 1rem;
-      padding: 0.62rem 0.9rem;
-      color: #f8fafc;
-    }
-    .msg-row.bot .bubble {
-      background: linear-gradient(180deg, rgba(24, 28, 42, 0.72), rgba(24, 28, 42, 0.36));
-      border: 1px solid rgba(148, 163, 184, 0.2);
-      border-radius: 0.9rem 0.9rem 0.9rem 0.24rem;
-      padding: 0.58rem 0.82rem;
-      color: #f1f5f9;
-      white-space: pre-wrap;
-    }
-
-    .bubble.loading {
-      border-color: rgba(251, 146, 60, 0.4);
-      background: linear-gradient(180deg, rgba(36, 29, 27, 0.95), rgba(34, 29, 29, 0.52));
-      color: #fdba74;
-    }
-    .heating-wrap {
-      display: flex;
-      align-items: center;
-      gap: 0.7rem;
-      min-width: 230px;
-    }
-    .microwave-loader {
-      width: 26px;
-      height: 26px;
-      border-radius: 8px;
-      border: 1px solid rgba(251, 146, 60, 0.7);
-      display: grid;
-      place-items: center;
-      position: relative;
-      background: rgba(18, 18, 24, 0.88);
-      color: #fb923c;
-    }
-    .microwave-loader::before,
-    .microwave-loader::after {
-      content: "";
-      position: absolute;
-      inset: -3px;
-      border-radius: 10px;
-      border: 1px solid rgba(251, 146, 60, 0.45);
-      opacity: 0;
-      animation: ping 1.5s ease-out infinite;
-    }
+    .bubble { max-width: min(780px, 78%); font-size: 0.92rem; line-height: 1.58; }
+    .msg-row.user .bubble { background: linear-gradient(165deg, #343b53, #282d42); border: 1px solid #3a4462; border-radius: 1rem 1rem 0.22rem 1rem; padding: 0.62rem 0.9rem; color: #f8fafc; }
+    .msg-row.bot .bubble { background: linear-gradient(180deg, rgba(24, 28, 42, 0.72), rgba(24, 28, 42, 0.36)); border: 1px solid rgba(148, 163, 184, 0.2); border-radius: 0.9rem 0.9rem 0.9rem 0.24rem; padding: 0.58rem 0.82rem; color: #f1f5f9; white-space: pre-wrap; }
+    .bubble.loading { border-color: rgba(251, 146, 60, 0.4); background: linear-gradient(180deg, rgba(36, 29, 27, 0.95), rgba(34, 29, 29, 0.52)); color: #fdba74; }
+    .heating-wrap { display: flex; align-items: center; gap: 0.7rem; min-width: 230px; }
+    .microwave-loader { width: 26px; height: 26px; border-radius: 8px; border: 1px solid rgba(251, 146, 60, 0.7); display: grid; place-items: center; position: relative; background: rgba(18, 18, 24, 0.88); color: #fb923c; }
+    .microwave-loader::before, .microwave-loader::after { content: ""; position: absolute; inset: -3px; border-radius: 10px; border: 1px solid rgba(251, 146, 60, 0.45); opacity: 0; animation: ping 1.5s ease-out infinite; }
     .microwave-loader::after { animation-delay: 0.45s; }
     .heating-copy { display: flex; flex-direction: column; gap: 0.15rem; }
     .heating-title { font-size: 0.8rem; color: #fed7aa; }
     .heating-sub { font-size: 0.72rem; color: #cbd5e1; opacity: 0.86; }
 
-    .msg-actions {
-      margin-top: 0.3rem;
-      display: flex;
-      gap: 0.35rem;
-    }
-    .action-btn {
-      background: none;
-      border: 1px solid transparent;
-      cursor: pointer;
-      color: var(--text-3);
-      padding: 0.24rem;
-      border-radius: 0.44rem;
-      display: flex;
-      align-items: center;
-    }
-    .action-btn:hover {
-      color: #f8fafc;
-      background: #1d2232;
-      border-color: #30374d;
-    }
-    .action-btn svg { width: 14px; height: 14px; }
+    #emptyState { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.62rem; color: var(--text-2); font-size: 0.95rem; padding: 0.8rem 1rem 4rem; text-align: center; }
+    #suggestions { margin-top: 0.8rem; display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; max-width: 700px; }
+    .suggestion { border: 1px solid #38405b; background: #1b2030; color: #cbd5e1; border-radius: 999px; font-size: 0.78rem; padding: 0.38rem 0.72rem; cursor: pointer; }
+    .suggestion:hover { border-color: rgba(251, 146, 60, 0.6); color: #fff7ed; box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12); }
 
-    #emptyState {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 0.62rem;
-      color: var(--text-2);
-      font-size: 0.95rem;
-      padding: 0.8rem 1rem 4rem;
-      text-align: center;
-    }
-    #emptyState .big {
-      font-size: 2.05rem;
-      filter: drop-shadow(0 0 20px rgba(249, 115, 22, 0.28));
-    }
-    #suggestions {
-      margin-top: 0.8rem;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-      justify-content: center;
-      max-width: 700px;
-    }
-    .suggestion {
-      border: 1px solid #38405b;
-      background: #1b2030;
-      color: #cbd5e1;
-      border-radius: 999px;
-      font-size: 0.78rem;
-      padding: 0.38rem 0.72rem;
-      cursor: pointer;
-    }
-    .suggestion:hover {
-      border-color: rgba(251, 146, 60, 0.6);
-      color: #fff7ed;
-      box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.12);
-    }
-
-    #inputArea {
-      padding: 0.65rem 9% 1.1rem;
-    }
-    #inputShell {
-      background: linear-gradient(180deg, rgba(24, 28, 41, 0.95), rgba(20, 23, 34, 0.95));
-      border-radius: 1.05rem;
-      padding: 0.68rem 0.68rem 0.62rem 0.95rem;
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-      border: 1px solid #353f5c;
-      box-shadow: 0 15px 40px rgba(0, 0, 0, 0.25);
-    }
-    #promptInput {
-      background: transparent;
-      border: none;
-      outline: none;
-      color: #f8fafc;
-      font-size: 0.92rem;
-      resize: none;
-      min-height: 24px;
-      max-height: 160px;
-      overflow-y: auto;
-      line-height: 1.5;
-    }
+    #inputArea { padding: 0.65rem 9% 1.1rem; }
+    #inputShell { background: linear-gradient(180deg, rgba(24, 28, 41, 0.95), rgba(20, 23, 34, 0.95)); border-radius: 1.05rem; padding: 0.68rem 0.68rem 0.62rem 0.95rem; display: flex; flex-direction: column; gap: 0.5rem; border: 1px solid #353f5c; box-shadow: 0 15px 40px rgba(0, 0, 0, 0.25); }
+    #promptInput { background: transparent; border: none; outline: none; color: #f8fafc; font-size: 0.92rem; resize: none; min-height: 24px; max-height: 160px; overflow-y: auto; line-height: 1.5; }
     #promptInput::placeholder { color: #76809c; }
-    .input-footer {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
+    .input-footer { display: flex; align-items: center; justify-content: space-between; }
     .input-left { display: flex; gap: 0.4rem; align-items: center; }
-    .model-select {
-      background: #23293b;
-      border: 1px solid #36405a;
-      color: #d1d5db;
-      font-size: 0.75rem;
-      padding: 0.27rem 0.55rem;
-      border-radius: 0.44rem;
-      cursor: pointer;
-      outline: none;
-    }
-    .model-select:hover { border-color: #4a5675; }
-    .model-select:focus { border-color: #7c8ab1; }
-    #statusText {
-      color: var(--text-3);
-      font-size: 0.72rem;
-      min-height: 1.1em;
-    }
-    #sendBtn {
-      min-width: 36px;
-      height: 36px;
-      padding: 0 0.66rem;
-      border-radius: 50%;
-      background: linear-gradient(170deg, #fb923c, #f97316);
-      border: 1px solid rgba(254, 215, 170, 0.45);
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-      box-shadow: 0 0 18px var(--accent-glow);
-      color: #1f130f;
-    }
-    #sendBtn:disabled {
-      opacity: 0.45;
-      cursor: default;
-      box-shadow: none;
-      filter: grayscale(0.35);
-    }
-    #sendBtn svg { color: #1a0f0a; }
-    #sendBtn.sending {
-      animation: warmPulse 1.3s ease-in-out infinite;
-    }
+    .model-select { background: #23293b; border: 1px solid #36405a; color: #d1d5db; font-size: 0.75rem; padding: 0.27rem 0.55rem; border-radius: 0.44rem; cursor: pointer; outline: none; }
+    #statusText { color: var(--text-3); font-size: 0.72rem; min-height: 1.1em; }
+    #sendBtn { min-width: 36px; height: 36px; padding: 0 0.66rem; border-radius: 50%; background: linear-gradient(170deg, #fb923c, #f97316); border: 1px solid rgba(254, 215, 170, 0.45); cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; box-shadow: 0 0 18px var(--accent-glow); color: #1f130f; }
+    #sendBtn:disabled { opacity: 0.45; cursor: default; box-shadow: none; filter: grayscale(0.35); }
+    #sendBtn.sending { animation: warmPulse 1.3s ease-in-out infinite; }
 
-    .error-pill {
-      color: #fecdd3;
-      background: rgba(127, 29, 29, 0.35);
-      border: 1px solid rgba(251, 113, 133, 0.45);
-      border-radius: 999px;
-      padding: 0.15rem 0.5rem;
-      font-size: 0.71rem;
-    }
-
-    @keyframes ping {
-      0% { transform: scale(0.95); opacity: 0.65; }
-      70% { transform: scale(1.35); opacity: 0; }
-      100% { transform: scale(1.35); opacity: 0; }
-    }
-    @keyframes warmPulse {
-      0%, 100% { box-shadow: 0 0 12px rgba(249, 115, 22, 0.28); }
-      50% { box-shadow: 0 0 24px rgba(249, 115, 22, 0.5); }
-    }
+    @keyframes ping { 0% { transform: scale(0.95); opacity: 0.65; } 70% { transform: scale(1.35); opacity: 0; } 100% { transform: scale(1.35); opacity: 0; } }
+    @keyframes warmPulse { 0%, 100% { box-shadow: 0 0 12px rgba(249, 115, 22, 0.28); } 50% { box-shadow: 0 0 24px rgba(249, 115, 22, 0.5); } }
 
     @media (max-width: 920px) {
       #sidebar { display: none; }
       .msg-row { padding: 0 5%; }
       #inputArea { padding: 0.65rem 5% 1rem; }
-      .bubble { max-width: 92%; }
-      #topBar { padding: 0.65rem 0.8rem; }
     }
   </style>
 </head>
 <body>
   <div id="sidebar">
     <div class="brand">
-      <div class="brand-icon">▣</div>
-      <div>
-        <h1>Microwave AI</h1>
-        <p>Heat up distributed inference</p>
-      </div>
+      <div class="brand-icon">&#9635;</div>
+      <div><h1>Microwave AI</h1><p>Distributed inference network</p></div>
     </div>
     <button id="newChatBtn">
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M12 5v14M5 12h14"/>
-      </svg>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
       New Chat Session
     </button>
     <div class="history-label">Today</div>
@@ -917,31 +1136,26 @@ async def chat_ui() -> str:
 
   <div id="chatArea">
     <div id="topBar">
-      <div class="top-title">
-        <span class="dot"></span>
-        <span>Microwave chat ready</span>
-      </div>
+      <div class="top-title"><span class="dot"></span><span>Microwave ready</span></div>
       <div class="pill-row">
-        <span class="pill mono">POST /chat</span>
+        <span class="pill mono" id="routePill">POST /chat</span>
         <span class="pill mono">region LAN</span>
         <span class="pill mono" id="activeModelTag">model llama3.2</span>
       </div>
     </div>
-
     <div id="messages">
       <div id="emptyState">
-        <div class="big">📡</div>
+        <div style="font-size:2rem;filter:drop-shadow(0 0 20px rgba(249,115,22,.28));">&#128225;</div>
         <div>What should we heat up?</div>
-        <div style="font-size:0.78rem;color:#73809f;">Microwave routes your request to a live node and streams tokens back in real-time.</div>
+        <div style="font-size:0.78rem;color:#73809f;">Microwave routes to the best experts &middot; Mixture of Experts &middot; parallel dispatch</div>
         <div id="suggestions">
           <button class="suggestion">Explain how Microwave AI routing works</button>
           <button class="suggestion">Write a healthy microwave mug cake recipe</button>
-          <button class="suggestion">Summarize this project in 5 bullets</button>
+          <button class="suggestion">Summarize distributed inference in 5 bullets</button>
           <button class="suggestion">Generate Python code for a websocket client</button>
         </div>
       </div>
     </div>
-
     <div id="inputArea">
       <div id="inputShell">
         <textarea id="promptInput" rows="1" placeholder="Ask Microwave AI anything..."></textarea>
@@ -974,420 +1188,103 @@ async def chat_ui() -> str:
   const historyList = document.getElementById('historyList');
   const statusText = document.getElementById('statusText');
   const activeModelTag = document.getElementById('activeModelTag');
+  const routePill = document.getElementById('routePill');
   const suggestionButtons = Array.from(document.querySelectorAll('.suggestion'));
 
-  let sessions = []; // [{title, messages:[{role,text,model,time}]}]
-  let activeIdx = -1;
-  let isSending = false;
+  let sessions = [], activeIdx = -1, isSending = false;
 
-  function newSession() {
-    const s = { title: null, messages: [] };
-    sessions.unshift(s);
-    activeIdx = 0;
-    renderHistory();
-    renderMessages();
-  }
-
+  function newSession() { sessions.unshift({ title: null, messages: [] }); activeIdx = 0; renderHistory(); renderMessages(); }
   function renderHistory() {
     historyList.innerHTML = '';
     sessions.forEach((s, i) => {
       const d = document.createElement('div');
       d.className = 'history-item' + (i === activeIdx ? ' active' : '');
       d.textContent = s.title || 'New conversation';
-      d.onclick = () => {
-        activeIdx = i;
-        renderHistory();
-        renderMessages();
-      };
+      d.onclick = () => { activeIdx = i; renderHistory(); renderMessages(); };
       historyList.appendChild(d);
     });
   }
-
   function renderMessages() {
     const s = sessions[activeIdx];
-    if (!s || s.messages.length === 0) {
-      messagesEl.innerHTML = '';
-      messagesEl.appendChild(emptyState);
-      return;
-    }
+    if (!s || !s.messages.length) { messagesEl.innerHTML = ''; messagesEl.appendChild(emptyState); return; }
     messagesEl.innerHTML = '';
     s.messages.forEach(m => appendBubble(m.role, m.text, { model: m.model, time: m.time }));
   }
-
-  function nowStamp() {
-    const d = new Date();
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-
-  function escapeHtml(text) {
-    return (text || '').replace(/[&<>"']/g, ch => ({
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;'
-    }[ch]));
-  }
+  function nowStamp() { return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
 
   function appendBubble(role, text, opts = {}) {
-    const row = document.createElement('div');
-    row.className = 'msg-row ' + role;
-
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    const who = role === 'user' ? 'You' : 'Microwave AI';
-    const model = opts.model ? ' · ' + opts.model : '';
-    const time = opts.time || nowStamp();
-    meta.innerHTML = `<span class="who">${who}${model}</span><span>${time}</span>`;
+    const row = document.createElement('div'); row.className = 'msg-row ' + role;
+    const meta = document.createElement('div'); meta.className = 'meta';
+    meta.innerHTML = '<span class="who">' + (role === 'user' ? 'You' : 'Microwave AI') + (opts.model ? ' &middot; ' + opts.model : '') + '</span><span>' + (opts.time || nowStamp()) + '</span>';
     row.appendChild(meta);
-
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble';
-    bubble.textContent = text;
+    const bubble = document.createElement('div'); bubble.className = 'bubble'; bubble.textContent = text;
     row.appendChild(bubble);
-
-    if (!opts.streaming) {
-      const actions = document.createElement('div');
-      actions.className = 'msg-actions';
-      const copyBtn = document.createElement('button');
-      copyBtn.className = 'action-btn';
-      copyBtn.title = 'Copy';
-      copyBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-      </svg>`;
-      copyBtn.onclick = () => navigator.clipboard.writeText(text || '').catch(() => {});
-      actions.appendChild(copyBtn);
-      row.appendChild(actions);
-    }
-
     messagesEl.appendChild(row);
     messagesEl.scrollTop = messagesEl.scrollHeight;
     return { row, bubble };
   }
-
   function createLoadingBubble() {
     const { row, bubble } = appendBubble('bot', '', { streaming: true, model: modelSelect.value });
     bubble.classList.add('loading');
-    bubble.innerHTML = `
-      <div class="heating-wrap">
-        <div class="microwave-loader">~</div>
-        <div class="heating-copy">
-          <div class="heating-title">Heating response...</div>
-          <div class="heating-sub">Microwave is routing and streaming</div>
-        </div>
-      </div>
-    `;
+    bubble.innerHTML = '<div class="heating-wrap"><div class="microwave-loader">~</div><div class="heating-copy"><div class="heating-title">Heating response...</div><div class="heating-sub">Routing &middot; MoE expert dispatch</div></div></div>';
     return { row, bubble };
   }
-
-  function updateSendBtn() {
-    sendBtn.disabled = isSending || promptEl.value.trim().length === 0;
-  }
-
-  function setStatus(text, isError) {
-    if (!text) {
-      statusText.textContent = '';
-      statusText.className = '';
-      return;
-    }
-    statusText.textContent = text;
-    statusText.className = isError ? 'error-pill' : '';
-  }
-
-  promptEl.addEventListener('input', () => {
-    promptEl.style.height = 'auto';
-    promptEl.style.height = Math.min(promptEl.scrollHeight, 160) + 'px';
-    updateSendBtn();
-  });
-
-  promptEl.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      doSend();
-    }
-  });
-
+  function updateSendBtn() { sendBtn.disabled = isSending || !promptEl.value.trim().length; }
+  promptEl.addEventListener('input', () => { promptEl.style.height = 'auto'; promptEl.style.height = Math.min(promptEl.scrollHeight, 160) + 'px'; updateSendBtn(); });
+  promptEl.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); } });
   sendBtn.addEventListener('click', doSend);
-  modelSelect.addEventListener('change', () => {
-    activeModelTag.textContent = 'model ' + modelSelect.value;
-  });
-
-  suggestionButtons.forEach(btn => {
-    btn.addEventListener('click', () => {
-      promptEl.value = btn.textContent;
-      promptEl.dispatchEvent(new Event('input'));
-      promptEl.focus();
-    });
-  });
+  modelSelect.addEventListener('change', () => { activeModelTag.textContent = 'model ' + modelSelect.value; });
+  suggestionButtons.forEach(btn => btn.addEventListener('click', () => { promptEl.value = btn.textContent; promptEl.dispatchEvent(new Event('input')); promptEl.focus(); }));
 
   async function doSend() {
     const prompt = promptEl.value.trim();
-    if (!prompt || sendBtn.disabled || isSending) return;
-
-    if (activeIdx === -1 || sessions.length === 0) newSession();
-
+    if (!prompt || isSending) return;
+    if (activeIdx === -1 || !sessions.length) newSession();
     const s = sessions[activeIdx];
-    const sentAt = nowStamp();
-    s.messages.push({ role: 'user', text: prompt, model: null, time: sentAt });
-    if (!s.title) {
-      s.title = prompt.slice(0, 32) + (prompt.length > 32 ? '…' : '');
-      renderHistory();
-    }
-
+    const ts = nowStamp();
+    s.messages.push({ role: 'user', text: prompt, model: null, time: ts });
+    if (!s.title) { s.title = prompt.slice(0, 32) + (prompt.length > 32 ? '...' : ''); renderHistory(); }
     if (messagesEl.contains(emptyState)) messagesEl.removeChild(emptyState);
-    appendBubble('user', prompt, { time: sentAt });
-
-    promptEl.value = '';
-    promptEl.style.height = 'auto';
-    isSending = true;
-    sendBtn.classList.add('sending');
-    setStatus('Heating...');
-    updateSendBtn();
-
+    appendBubble('user', prompt, { time: ts });
+    promptEl.value = ''; promptEl.style.height = 'auto';
+    isSending = true; sendBtn.classList.add('sending'); statusText.textContent = 'Heating...'; updateSendBtn();
     const loading = createLoadingBubble();
-    const botBubble = loading.bubble;
-    const botRow = loading.row;
-    let fullText = '';
-    let convertedFromLoading = false;
-
+    let fullText = '', converted = false;
     try {
-      const res = await fetch('/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, region: 'LAN', model: modelSelect.value }),
-      });
-
-      if (!res.ok || !res.body) {
-        const detail = res.status === 503
-          ? 'No active nodes. Start or connect a node first.'
-          : 'Request failed with status ' + res.status;
-        botBubble.classList.remove('loading');
-        botBubble.textContent = detail;
-        setStatus(detail, true);
-        return;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      let done = false;
-
-      while (!done) {
-        const { value, done: d } = await reader.read();
-        done = d;
-        if (value) {
-          buf += decoder.decode(value, { stream: !done });
-          const lines = buf.split('\n');
-          buf = lines.pop();
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            try {
-              const obj = JSON.parse(line);
-              if (typeof obj.response === 'string') {
-                if (!convertedFromLoading) {
-                  convertedFromLoading = true;
-                  botBubble.classList.remove('loading');
-                  botBubble.textContent = '';
-                }
-                fullText += obj.response;
-                botBubble.textContent = fullText;
-                messagesEl.scrollTop = messagesEl.scrollHeight;
-              }
-            } catch (_) {
-              if (!convertedFromLoading) {
-                convertedFromLoading = true;
-                botBubble.classList.remove('loading');
-                botBubble.textContent = '';
-              }
-              fullText += line;
-              botBubble.textContent = fullText;
+      const res = await fetch('/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, region: 'LAN', model: modelSelect.value }) });
+      if (!res.ok || !res.body) { loading.bubble.classList.remove('loading'); loading.bubble.textContent = 'Error: ' + res.status; return; }
+      const reader = res.body.getReader(); const decoder = new TextDecoder(); let buf = '';
+      while (true) {
+        const { value, done } = await reader.read(); if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n'); buf = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const obj = JSON.parse(line);
+            if (obj.route) {
+              const experts = (obj.route.experts || []).map(e => e.node_id).join(', ');
+              routePill.textContent = (obj.route.mode || 'direct') + ' (' + (obj.route.strategy || '?') + ') via ' + (experts || obj.route.node_id || '?');
             }
-          }
+            if (typeof obj.response === 'string') {
+              if (!converted) { converted = true; loading.bubble.classList.remove('loading'); loading.bubble.textContent = ''; }
+              fullText += obj.response; loading.bubble.textContent = fullText; messagesEl.scrollTop = messagesEl.scrollHeight;
+            }
+          } catch (e) { if (!converted) { converted = true; loading.bubble.classList.remove('loading'); loading.bubble.textContent = ''; } fullText += line; loading.bubble.textContent = fullText; }
         }
       }
-
-      if (!convertedFromLoading && !fullText) {
-        botBubble.classList.remove('loading');
-        botBubble.textContent = 'No response received from node.';
-      }
-
-      const actions = document.createElement('div');
-      actions.className = 'msg-actions';
-      const copyBtn = document.createElement('button');
-      copyBtn.className = 'action-btn';
-      copyBtn.title = 'Copy';
-      copyBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-      </svg>`;
-      copyBtn.onclick = () => navigator.clipboard.writeText(fullText).catch(() => {});
-      actions.appendChild(copyBtn);
-      botRow.appendChild(actions);
-
-      s.messages.push({
-        role: 'bot',
-        text: fullText || botBubble.textContent,
-        model: modelSelect.value,
-        time: nowStamp()
-      });
-      setStatus('Served by Microwave network');
-    } catch (e) {
-      botBubble.classList.remove('loading');
-      botBubble.textContent = 'Error: ' + (e && e.message ? e.message : 'unknown');
-      setStatus('Stream error. Please retry.', true);
-    } finally {
-      isSending = false;
-      sendBtn.classList.remove('sending');
-      updateSendBtn();
-      promptEl.focus();
-    }
+      if (!converted) { loading.bubble.classList.remove('loading'); loading.bubble.textContent = fullText || 'No response.'; }
+      s.messages.push({ role: 'bot', text: fullText || loading.bubble.textContent, model: modelSelect.value, time: nowStamp() });
+      statusText.textContent = 'Served by Microwave network';
+    } catch (e) { loading.bubble.classList.remove('loading'); loading.bubble.textContent = 'Error: ' + e.message; statusText.textContent = 'Error'; }
+    finally { isSending = false; sendBtn.classList.remove('sending'); updateSendBtn(); promptEl.focus(); }
   }
-
-  document.getElementById('newChatBtn').addEventListener('click', () => {
-    newSession();
-    promptEl.focus();
-  });
-
-  // Start with a fresh session
-  newSession();
-  activeModelTag.textContent = 'model ' + modelSelect.value;
-  promptEl.focus();
+  document.getElementById('newChatBtn').addEventListener('click', () => { newSession(); promptEl.focus(); });
+  newSession(); activeModelTag.textContent = 'model ' + modelSelect.value; promptEl.focus();
 </script>
 </body>
 </html>
     """
-
-
-
-def choose_node(region: Optional[str]) -> Optional[NodeInfo]:
-    """Round-robin selection, preferring nodes in requested region."""
-    global _rr_index
-    if not nodes:
-        return None
-
-    if region:
-        candidates = [n for n in nodes if n.region == region]
-        if not candidates:
-            candidates = list(nodes)
-    else:
-        candidates = list(nodes)
-
-    if not candidates:
-        return None
-
-    idx = _rr_index % len(candidates)
-    _rr_index += 1
-    return candidates[idx]
-
-
-@app.post("/chat")
-async def chat(request: Request) -> StreamingResponse:
-    payload = await request.json()
-    prompt: str = payload.get("prompt", "")
-    region: Optional[str] = payload.get("region")
-    model: Optional[str] = payload.get("model")
-
-    node = choose_node(region)
-    if not node:
-        raise HTTPException(status_code=503, detail="No nodes are currently registered")
-
-    if node.is_ws and node.node_id in _ws_connections:
-        return await _chat_via_ws(node, prompt, model)
-    else:
-        return _chat_via_http(node, prompt, model)
-
-
-def _chat_via_http(node: NodeInfo, prompt: str, model: Optional[str]) -> StreamingResponse:
-    infer_payload: Dict[str, Any] = {"prompt": prompt}
-    if model:
-        infer_payload["model"] = model
-
-    async def stream_from_node():
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream(
-                "POST", f"{node.base_url}/infer", json=infer_payload
-            ) as resp:
-                if resp.status_code != 200:
-                    text = await resp.aread()
-                    yield text
-                    return
-                async for chunk in resp.aiter_bytes():
-                    if chunk:
-                        yield chunk
-
-    return StreamingResponse(stream_from_node(), media_type="application/octet-stream")
-
-
-async def _chat_via_ws(node: NodeInfo, prompt: str, model: Optional[str]) -> StreamingResponse:
-    ws = _ws_connections.get(node.node_id)
-    lock = _ws_locks.get(node.node_id)
-    if not ws or not lock:
-        raise HTTPException(status_code=503, detail="Node disconnected")
-
-    task_id = uuid.uuid4().hex
-    queue: asyncio.Queue = asyncio.Queue()
-    _task_queues[task_id] = queue
-
-    try:
-        async with lock:
-            await ws.send_json({
-                "type": "task",
-                "task_id": task_id,
-                "prompt": prompt,
-                "model": model or "",
-            })
-    except Exception:
-        _task_queues.pop(task_id, None)
-        raise HTTPException(status_code=503, detail="Failed to reach node")
-
-    async def stream_from_ws():
-        try:
-            while True:
-                chunk = await asyncio.wait_for(queue.get(), timeout=120.0)
-                if chunk is None:
-                    break
-                if isinstance(chunk, str):
-                    yield chunk.encode("utf-8")
-                else:
-                    yield chunk
-        except asyncio.TimeoutError:
-            yield b'{"error":"node timeout"}'
-        finally:
-            _task_queues.pop(task_id, None)
-
-    return StreamingResponse(stream_from_ws(), media_type="application/octet-stream")
-
-
-@app.post("/nodes/health")
-async def health_check_nodes() -> JSONResponse:
-    async with httpx.AsyncClient() as client:
-        for node in list(nodes):
-            if node.is_ws:
-                ws = _ws_connections.get(node.node_id)
-                lock = _ws_locks.get(node.node_id)
-                if ws and lock:
-                    try:
-                        start = time.perf_counter()
-                        async with lock:
-                            await ws.send_json({"type": "ping"})
-                        node.last_heartbeat = time.time()
-                        node.last_latency_ms = (time.perf_counter() - start) * 1000.0
-                    except Exception:
-                        node.last_latency_ms = -1.0
-                else:
-                    node.last_latency_ms = -1.0
-            else:
-                start = time.perf_counter()
-                try:
-                    resp = await client.get(f"{node.base_url}/health", timeout=2.0)
-                    if resp.status_code == 200:
-                        node.last_heartbeat = time.time()
-                        node.last_latency_ms = (time.perf_counter() - start) * 1000.0
-                    else:
-                        node.last_latency_ms = -1.0
-                except Exception:
-                    node.last_latency_ms = -1.0
-
-    return JSONResponse({"status": "ok", "count": len(nodes)})
 
 
 def main() -> None:
@@ -1395,11 +1292,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Microwave AI Gateway")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host")
     parser.add_argument("--port", type=int, default=8000, help="Bind port")
+    parser.add_argument(
+        "--max-region-km",
+        type=float,
+        default=2000.0,
+        help="Max distance (km) for expert region filtering",
+    )
+    parser.add_argument(
+        "--default-k",
+        type=int,
+        default=2,
+        help="Default number of MoE experts per request",
+    )
     args = parser.parse_args()
 
+    region_engine.max_distance_km = args.max_region_km
+    moe_coordinator.default_k = args.default_k
     uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
     main()
-

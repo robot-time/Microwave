@@ -2,52 +2,40 @@
 set -e
 
 # ─────────────────────────────────────────────
-#  Microwave AI – one-command setup
+#  Microwave AI – zero-config setup
+#  Just run: bash setup.sh
+#
+#  Optional env overrides (set before running):
+#    MICROWAVE_GATEWAY_URL   gateway address
+#    MICROWAVE_MODEL         model to pull (default: llama3.2)
+#    MICROWAVE_REGION        region label (default: LAN)
+#    MICROWAVE_MODE          "simple" or "pipeline"
+#    MICROWAVE_DRAFT_MODELS  comma-separated draft models
+#    MICROWAVE_EXPERT_DOMAINS comma-separated domains (code,math,general)
+#    MICROWAVE_LAT / LON     manual coordinates
 # ─────────────────────────────────────────────
 
 REPO_URL="https://github.com/robot-time/Microwave.git"
 REPO_DIR="Microwave"
 CONFIG_FILE=".microwave.env"
 
-# ── find python binary ───────────────────────
+C="\033[1;36m"; G="\033[1;32m"; Y="\033[1;33m"; R="\033[1;31m"
+B="\033[1m"; D="\033[2m"; X="\033[0m"
+
+# ── find python ──────────────────────────────
 PYTHON=""
 for cmd in python3 python; do
-  if command -v "$cmd" >/dev/null 2>&1; then
-    PYTHON="$cmd"
-    break
-  fi
+  command -v "$cmd" >/dev/null 2>&1 && { PYTHON="$cmd"; break; }
 done
-if [ -z "$PYTHON" ]; then
-  echo "ERROR: Python not found. Install Python 3.10+ and re-run."
-  exit 1
-fi
+[ -z "$PYTHON" ] && { echo -e "${R}Python not found. Install Python 3.10+.${X}"; exit 1; }
 
-# ── colours ──────────────────────────────────
-BOLD="\033[1m"
-CYAN="\033[1;36m"
-GREEN="\033[1;32m"
-YELLOW="\033[1;33m"
-RED="\033[1;31m"
-DIM="\033[2m"
-RESET="\033[0m"
-
-# ── are we already inside the repo? ──────────
+# ── clone if needed ──────────────────────────
 if [ ! -f "pyproject.toml" ]; then
-  if [ -d "$REPO_DIR/.git" ]; then
-    echo "Updating repo ..."
-    git -C "$REPO_DIR" pull --ff-only || true
-  else
-    echo "Cloning repo ..."
-    git clone "$REPO_URL" "$REPO_DIR"
-  fi
-  cd "$REPO_DIR"
-  exec bash setup.sh
+  [ -d "$REPO_DIR/.git" ] && git -C "$REPO_DIR" pull --ff-only 2>/dev/null || git clone "$REPO_URL" "$REPO_DIR"
+  cd "$REPO_DIR" && exec bash setup.sh
 fi
-
-# ── From here on, we are inside the repo ─────
 
 clear
-
 cat << 'EOF'
      ________________
     |.-----------.   |
@@ -57,143 +45,104 @@ cat << 'EOF'
     ||  '-----'  | _ |
     ||___________|[_]|
     '----------------'
-------------------------------------------------
 EOF
-
-echo -e "${BOLD}Microwave Network${RESET} – decentralised AI inference"
-echo -e "${DIM}github.com/robot-time/Microwave${RESET}"
+echo -e "${B}Microwave Network${X} v0.3.0"
 echo ""
 
-# ── detect LAN IP ────────────────────────────
+# ── auto-detect everything ───────────────────
 detect_ip() {
   local ip=""
-  if [ -z "$ip" ] && command -v ip >/dev/null 2>&1; then
-    ip=$(ip route get 1.1.1.1 2>/dev/null | awk '/src/ { print $7; exit }')
-  fi
-  if [ -z "$ip" ]; then
-    local maybe_mac
-    maybe_mac=$(ipconfig getifaddr en0 2>/dev/null || true)
-    [ -n "$maybe_mac" ] && ip="$maybe_mac"
-  fi
-  if [ -z "$ip" ]; then
-    local maybe_mac
-    maybe_mac=$(ipconfig getifaddr en1 2>/dev/null || true)
-    [ -n "$maybe_mac" ] && ip="$maybe_mac"
-  fi
-  if [ -z "$ip" ] && command -v ipconfig.exe >/dev/null 2>&1; then
-    ip=$(ipconfig.exe 2>/dev/null | grep -i "IPv4" | head -1 | sed 's/.*: //' | tr -d '\r' || true)
-  fi
-  if [ -z "$ip" ] && command -v hostname >/dev/null 2>&1; then
-    ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
-  fi
-  echo "$ip"
+  command -v ip >/dev/null 2>&1 && ip=$(ip route get 1.1.1.1 2>/dev/null | awk '/src/{print $7;exit}')
+  [ -z "$ip" ] && ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)
+  [ -z "$ip" ] && command -v hostname >/dev/null 2>&1 && ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  echo "${ip:-0.0.0.0}"
 }
 
 NODE_IP=$(detect_ip)
-if [ -z "$NODE_IP" ]; then
-  echo -e "${RED}Could not auto-detect your LAN IP.${RESET}"
-  read -rp "  Enter this machine's LAN IP: " NODE_IP
+MODEL="${MICROWAVE_MODEL:-llama3.2}"
+REGION="${MICROWAVE_REGION:-LAN}"
+GATEWAY_URL="${MICROWAVE_GATEWAY_URL:-https://electricity-guzzler.tail7917c7.ts.net}"
+SETUP_MODE="${MICROWAVE_MODE:-simple}"
+ENGINE_TYPE="ollama"
+DRAFT_MODELS="${MICROWAVE_DRAFT_MODELS:-}"
+EXPERT_DOMAINS="${MICROWAVE_EXPERT_DOMAINS:-general}"
+LAT="${MICROWAVE_LAT:-0.0}"
+LON="${MICROWAVE_LON:-0.0}"
+
+[ "$SETUP_MODE" = "pipeline" ] && ENGINE_TYPE="llamacpp"
+
+# auto-geolocate if no manual coords
+if [ "$LAT" = "0.0" ] && [ "$LON" = "0.0" ]; then
+  GEO=$(curl -sf "http://ip-api.com/json/?fields=lat,lon,status" 2>/dev/null || echo '{}')
+  LAT=$($PYTHON -c "import sys,json;d=json.load(sys.stdin);print(d.get('lat',0.0))" <<< "$GEO" 2>/dev/null || echo "0.0")
+  LON=$($PYTHON -c "import sys,json;d=json.load(sys.stdin);print(d.get('lon',0.0))" <<< "$GEO" 2>/dev/null || echo "0.0")
 fi
 
-# ── defaults (node, reverse mode, llama3.2) ──
-ROLE="2"
-REVERSE_MODE=true
-GATEWAY_PORT=8000
-NODE_PORT=9000
-MODEL="llama3.2"
-REGION="LAN"
-GATEWAY_URL="${MICROWAVE_GATEWAY_URL:-https://electricity-guzzler.tail7917c7.ts.net}"
-
-echo -e "  LAN IP:  ${CYAN}${NODE_IP}${RESET}"
-echo -e "  Mode:    ${CYAN}Node (reverse WebSocket)${RESET}"
-echo -e "  Gateway: ${CYAN}${GATEWAY_URL}${RESET}"
-echo -e "  Model:   ${CYAN}${MODEL}${RESET}"
+echo -e "  ${C}IP${X}  $NODE_IP   ${C}Model${X}  $MODEL   ${C}Gateway${X}  $GATEWAY_URL"
+echo -e "  ${C}Domains${X}  $EXPERT_DOMAINS"
+[ "$LAT" != "0.0" ] && echo -e "  ${C}Location${X}  $LAT, $LON"
 echo ""
 
-# ── persist config for run.sh ────────────────
+# ── save config ──────────────────────────────
 cat > "$CONFIG_FILE" <<EOF
-MICROWAVE_ROLE="$ROLE"
 MICROWAVE_GATEWAY_URL="$GATEWAY_URL"
-MICROWAVE_GATEWAY_PORT="$GATEWAY_PORT"
 MICROWAVE_NODE_IP="$NODE_IP"
-MICROWAVE_NODE_PORT="$NODE_PORT"
 MICROWAVE_REGION="$REGION"
 MICROWAVE_MODEL="$MODEL"
-MICROWAVE_REVERSE_MODE="$REVERSE_MODE"
+MICROWAVE_ENGINE="$ENGINE_TYPE"
+MICROWAVE_DRAFT_MODELS="$DRAFT_MODELS"
+MICROWAVE_EXPERT_DOMAINS="$EXPERT_DOMAINS"
+MICROWAVE_LAT="$LAT"
+MICROWAVE_LON="$LON"
+MICROWAVE_SETUP_MODE="$SETUP_MODE"
 EOF
 
-# ── pull latest ──────────────────────────────
-echo -e "${BOLD}[1/3] Pulling latest code${RESET}"
-git pull --ff-only 2>/dev/null || true
-echo ""
-
-# ── python venv + install ────────────────────
-echo -e "${BOLD}[2/3] Python environment${RESET}"
-if [ ! -d ".venv" ]; then
-  echo "  Creating .venv ..."
-  $PYTHON -m venv .venv
-fi
-
+# ── [1/3] python ─────────────────────────────
+echo -e "${B}[1/3]${X} Python environment"
+[ ! -d ".venv" ] && $PYTHON -m venv .venv
 VENV_BIN=""
-if [ -d ".venv/Scripts" ]; then
-  VENV_BIN="$(cd .venv/Scripts && pwd)"
-elif [ -d ".venv/bin" ]; then
-  VENV_BIN="$(cd .venv/bin && pwd)"
-fi
-
-if [ -z "$VENV_BIN" ]; then
-  echo -e "  ${RED}venv created but bin dir missing.${RESET}"
-  echo "  Try: rm -rf .venv && bash setup.sh"
-  exit 1
-fi
-
+[ -d ".venv/Scripts" ] && VENV_BIN="$(cd .venv/Scripts && pwd)"
+[ -d ".venv/bin" ] && VENV_BIN="$(cd .venv/bin && pwd)"
+[ -z "$VENV_BIN" ] && { echo -e "${R}venv bin missing. rm -rf .venv && retry.${X}"; exit 1; }
 export PATH="$VENV_BIN:$PATH"
-pip install --upgrade pip >/dev/null 2>&1 || true
-pip install -e . >/dev/null 2>&1 || {
-  echo -e "  ${YELLOW}Retrying pip install ...${RESET}"
-  pip install -e . 2>&1 || true
-}
-echo -e "  ${GREEN}Done.${RESET}"
-echo ""
-
-# ── ollama check + model pull ────────────────
-echo -e "${BOLD}[3/3] Ollama + model${RESET}"
-if ! command -v ollama >/dev/null 2>&1; then
-  echo -e "  ${YELLOW}Ollama not found.${RESET} Installing ..."
-
-  if command -v ipconfig.exe >/dev/null 2>&1; then
-    echo "  Windows: open PowerShell and run:"
-    echo "    irm https://ollama.com/install.ps1 | iex"
-    read -rp "  Press Enter once Ollama is installed... " _
-  else
-    if bash -c "curl -fsSL https://ollama.com/install.sh | sh"; then
-      echo -e "  ${GREEN}Ollama installed.${RESET}"
-    else
-      echo -e "  ${YELLOW}Auto-install failed.${RESET} Run manually:"
-      echo "    curl -fsSL https://ollama.com/install.sh | sh"
-      read -rp "  Press Enter once Ollama is installed... " _
-    fi
-  fi
-fi
-
-while ! command -v ollama >/dev/null 2>&1; do
-  echo -e "  ${RED}Ollama still not in PATH.${RESET}"
-  read -rp "  Press Enter to retry (or Ctrl+C to quit)... " _
-done
-
-if ! ollama list 2>/dev/null | grep -q "$MODEL"; then
-  echo "  Pulling '${MODEL}' (first time only) ..."
-  ollama pull "$MODEL"
+pip install --upgrade pip -q 2>/dev/null || true
+if [ "$SETUP_MODE" = "pipeline" ]; then
+  pip install -e ".[pipeline]" -q 2>&1 || pip install -e ".[pipeline]" 2>&1
 else
-  echo -e "  ${GREEN}'${MODEL}' ready.${RESET}"
+  pip install -e . -q 2>&1 || pip install -e . 2>&1
 fi
+echo -e "  ${G}done${X}"
+
+# ── [2/3] ollama ─────────────────────────────
+echo -e "${B}[2/3]${X} Ollama + models"
+if ! command -v ollama >/dev/null 2>&1; then
+  echo -e "  ${Y}Installing Ollama...${X}"
+  curl -fsSL https://ollama.com/install.sh | sh 2>/dev/null || {
+    echo -e "  ${Y}Auto-install failed.${X} Install manually: https://ollama.com"
+    echo -e "  Then re-run: ${C}bash setup.sh${X}"
+    exit 1
+  }
+fi
+ollama list 2>/dev/null | grep -q "$MODEL" || { echo "  Pulling $MODEL ..."; ollama pull "$MODEL"; }
+echo -e "  ${G}$MODEL ready${X}"
+
+if [ -n "$DRAFT_MODELS" ]; then
+  IFS=',' read -ra DA <<< "$DRAFT_MODELS"
+  for dm in "${DA[@]}"; do
+    dm=$(echo "$dm" | xargs)
+    [ -n "$dm" ] && { ollama list 2>/dev/null | grep -q "$dm" || ollama pull "$dm"; }
+  done
+fi
+
+# ── [3/3] start ──────────────────────────────
+echo -e "${B}[3/3]${X} Starting node"
 echo ""
 
-# ── start ────────────────────────────────────
-echo -e "${GREEN}Setup complete. Starting node ...${RESET}"
+ARGS="--gateway-url $GATEWAY_URL --region $REGION --model $MODEL"
+ARGS="$ARGS --engine $ENGINE_TYPE --latitude $LAT --longitude $LON --reverse"
+ARGS="$ARGS --expert-domains $EXPERT_DOMAINS"
+[ -n "$DRAFT_MODELS" ] && ARGS="$ARGS --draft-models $DRAFT_MODELS"
+
+echo -e "${G}Setup complete.${X} Connecting to network ..."
 echo ""
-microwave-node \
-  --gateway-url "$GATEWAY_URL" \
-  --region "$REGION" \
-  --model "$MODEL" \
-  --reverse
+exec microwave-node $ARGS

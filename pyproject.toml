@@ -1,7 +1,7 @@
 [project]
 name = "microwave-ai"
-version = "0.2.0"
-description = "Phase 0 LAN prototype for Microwave AI: gateway and node services in Python."
+version = "0.3.0"
+description = "Decentralized AI inference with pipeline parallelism, speculative decoding, and latency-optimized routing."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -9,6 +9,15 @@ dependencies = [
   "uvicorn[standard]>=0.30.0",
   "httpx>=0.27.0",
   "websockets>=12.0",
+  "numpy>=1.24.0",
+  "psutil>=5.9.0",
+  "msgpack>=1.0.0",
+  "lz4>=4.3.0",
+]
+
+[project.optional-dependencies]
+pipeline = [
+  "llama-cpp-python>=0.2.0",
 ]
 
 [project.scripts]
@@ -22,4 +31,3 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["microwave_ai*"]
-
