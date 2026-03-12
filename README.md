@@ -12,7 +12,7 @@ Microwave AI
 
 > Decentralized AI inference – **BitTorrent for AI**.
 
-Anyone can run a node. Nodes contribute compute. Requests get routed to nearby, reliable machines. The network grows from a couple of friends on a LAN to a global mesh of volunteer GPUs.
+Anyone can run a node. Nodes contribute compute as **experts**. A router picks the best experts for each prompt and queries them **in parallel**. The network grows from a couple of friends on a LAN to a global mesh of volunteer GPUs.
 
 ---
 
@@ -26,7 +26,7 @@ cd Microwave
 bash setup.sh
 ```
 
-That's it. The script clones the repo, installs dependencies, pulls a model, connects to the network, and drops you into an **interactive chat**.
+That's it. The script installs dependencies, pulls a model, connects to the network, and your machine becomes an expert node.
 
 After the first run, use the fast launcher:
 
@@ -36,31 +36,50 @@ bash run.sh
 
 > **Windows (no admin):** Install Python from the Microsoft Store and [Git for Windows](https://git-scm.com/download/win), then run the commands above in **Git Bash**. Right-click to paste.
 
+### Expert domains
+
+Each node can specialize. Set domains before running setup:
+
+```bash
+MICROWAVE_EXPERT_DOMAINS="code,math" bash setup.sh
+```
+
+Available domains: `general`, `code`, `math`, `creative`, `science`, `reasoning`. Defaults to `general` if unset.
+
 ---
 
 ## How it works
 
 ```text
-You  ──►  Gateway  ──►  Best Node (runs full model via Ollama)
-                 ◄──  streams tokens back  ◄──
+User  ──►  Gateway (router)  ──►  Expert 1  ──►  ┐
+                              ──►  Expert 2  ──►  ├── Aggregate ──► Stream back
+                              ──►  Expert K  ──►  ┘
 ```
 
-- Each node runs a **complete model** locally.
-- Nodes connect to the gateway over a **reverse WebSocket** — no open ports, no firewall changes.
-- The gateway picks the best node (region + health + round-robin).
+Microwave uses a **Mixture of Experts (MoE)** architecture:
+
+1. **Prompt arrives** at the gateway.
+2. **Router classifies** the prompt by domain (code, math, creative, etc.) and scores every online expert by relevance + latency + compute capacity.
+3. **Top-K experts** receive the prompt **in parallel** — latency = slowest single expert, not the sum of all.
+4. **Aggregation** returns the fastest response (or highest-confidence, or blended).
+
+Each node runs a **complete model** locally via Ollama and connects over a **reverse WebSocket** — no open ports, no firewall changes.
 
 | What | Where |
 |------|-------|
 | Dashboard | `http://GATEWAY:8000/` |
 | Chat UI | `http://GATEWAY:8000/chat-ui` |
-| Terminal chat | Starts automatically on the node |
+| Expert list | `http://GATEWAY:8000/experts` |
+| Route preview | `POST /experts/route` |
 | API | `POST /chat` (see below) |
 
 ```bash
 curl -N http://GATEWAY:8000/chat \
   -H "Content-Type: application/json" \
-  -d '{"prompt": "What is Microwave AI?", "region": "LAN", "model": "llama3.2"}'
+  -d '{"prompt": "Write a python sort function", "model": "llama3.2", "strategy": "fastest"}'
 ```
+
+The `strategy` field controls aggregation: `fastest` (default), `confidence`, or `blend`.
 
 ---
 
@@ -71,9 +90,10 @@ curl -N http://GATEWAY:8000/chat \
 | **0** | 2 machines on a LAN serving a model | done |
 | **1** | 5–10 LAN nodes, health checks, load balancing | done |
 | **2** | WAN support — reverse WebSocket from anywhere | done |
-| **3** | Model marketplace — nodes advertise capabilities | planned |
-| **4** | Reputation system, incentives | planned |
-| **5** | Distributed Mixture-of-Experts research | future |
+| **3** | Mixture of Experts — parallel dispatch, domain routing | done |
+| **4** | Latency-optimized networking — EWMA tracking, geo-aware | done |
+| **5** | Model marketplace — nodes advertise capabilities | planned |
+| **6** | Reputation system, incentives | planned |
 
 ---
 
@@ -84,29 +104,70 @@ curl -N http://GATEWAY:8000/chat \
 
 Most AI lives behind a few companies' APIs. Microwave asks: what if models ran on a **network of volunteer machines** instead?
 
-### Full-model-per-node (current design)
+### Mixture of Experts (MoE)
 
-Each node is an independent inference engine running a complete model. The gateway discovers nodes, tracks health, and routes requests to the best one. No model sharding = no inter-node latency penalty.
+Every node is an **expert**. The gateway's router selects which experts to activate for each prompt:
+
+```text
+device
+  ↓
+small local router (on gateway, near-zero latency)
+  ↓
+distributed experts (parallel)
+```
+
+**Scoring formula per expert:**
+```
+score = 0.35 × domain_relevance + 0.45 × speed_score + 0.20 × capacity_score
+```
+
+- **Domain relevance** — keyword classifier maps prompts to domains, matched against each expert's declared specialties.
+- **Speed score** — derived from EWMA ping latency (faster = higher).
+- **Capacity score** — normalized GPU/compute benchmark.
+
+The router also adapts **K** (how many experts to query) based on prompt complexity: simple questions → 1 expert, complex multi-domain prompts → 2-3 experts.
+
+### Why MoE over pipeline parallelism?
+
+| | Pipeline (serial) | MoE (parallel) |
+|---|---|---|
+| Latency | `sum(all stages)` | `max(1 expert)` |
+| Failure | 1 node down = broken | 1 down = use others |
+| Communication | Tensor serialization | Standard prompt/response |
+| Scaling | More nodes = more hops | More nodes = more choices |
 
 ### System components
 
-1. **Node** — registers with the gateway, exposes `/health` and `/infer` (HTTP mode) or communicates over WebSocket (reverse mode), talks to local Ollama.
-2. **Gateway** — maintains a registry, routes `POST /chat` to the best node, streams tokens back.
-3. **Ollama** — local model runtime on each node.
+1. **Expert Node** — registers with the gateway with its model, domains, and hardware capabilities. Handles `moe_expert_task` messages by running Ollama and streaming chunks back.
+2. **Gateway** — maintains the expert registry, runs the MoE router, dispatches to top-K experts in parallel, aggregates responses, and streams tokens to the user.
+3. **Router** (`inference/router.py`) — classifies prompts, scores experts, selects top-K.
+4. **MoE Coordinator** (`inference/moe.py`) — parallel dispatch, response aggregation (fastest / confidence / blend).
+5. **Ollama** — local model runtime on each node.
 
-### Request flow (reverse/WS mode)
+### Aggregation strategies
+
+| Strategy | Behavior | Best for |
+|----------|----------|----------|
+| `fastest` | Lock onto whichever expert streams first | Lowest time-to-first-token |
+| `confidence` | Collect all responses, pick highest confidence | Best quality |
+| `blend` | Stream fastest, note disagreements | Balance of speed and quality |
+
+### Network layer
+
+- **EWMA latency tracking** — exponentially weighted moving average for robust ping estimates.
+- **Geographic awareness** — Haversine distance between nodes, IP geolocation auto-detection.
+- **Inter-node topology** — RTT matrix for optimal routing decisions.
+
+### Request flow (MoE / reverse WS)
 
 ```text
-Node connects OUT ──WebSocket──► Gateway
-User ──POST /chat──────────────► Gateway ──task──► Node
-User ◄──streaming tokens──────── Gateway ◄─chunks─ Node
+Expert nodes connect OUT ──WebSocket──► Gateway
+User ──POST /chat──────────────────────► Gateway
+  Gateway router selects top-K experts
+  Gateway ──moe_expert_task──► Expert 1 (parallel)
+  Gateway ──moe_expert_task──► Expert 2 (parallel)
+  Expert 1 ──moe_expert_chunk──► Gateway ──stream──► User
 ```
-
-### Request flow (HTTP mode)
-
-1. Node → `POST /nodes/register` → Gateway
-2. User → `POST /chat` → Gateway → `POST /infer` → Node
-3. Node streams Ollama tokens back through the gateway.
 
 ### APIs
 
@@ -116,13 +177,16 @@ User ◄──streaming tokens──────── Gateway ◄─chunks─ N
 | `/nodes/ws` | WebSocket | Reverse-connect a node (WAN mode) |
 | `/nodes` | GET | List registered nodes |
 | `/nodes/health` | POST | Ping all nodes |
-| `/chat` | POST | Send a prompt (streaming) |
+| `/experts` | GET | List MoE experts with scores |
+| `/experts/route` | POST | Preview routing for a prompt (dry-run) |
+| `/chat` | POST | Send a prompt (streaming MoE) |
+| `/health` | GET | Gateway health + MoE stats |
 | `/` | GET | Dashboard |
 | `/chat-ui` | GET | Chat UI |
 
 ### Tech stack
 
-- **Python** — FastAPI + httpx + uvicorn + websockets
+- **Python** — FastAPI + httpx + uvicorn + websockets + numpy + psutil
 - **Ollama** — local LLM runtime
 - Protocol is HTTP/JSON + WebSocket; easy to reimplement in Go/Rust/Node later.
 
@@ -134,13 +198,25 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 microwave-gateway --host 0.0.0.0 --port 8000
 
-# Node (LAN)
-microwave-node --gateway-url http://GATEWAY:8000 --region LAN --model llama3.2 --host THIS_IP --port 9000
+# Expert node (LAN)
+microwave-node --gateway-url http://GATEWAY:8000 --region LAN --model llama3.2 \
+  --expert-domains general,code --host THIS_IP --port 9000
 
-# Node (WAN)
-microwave-node --gateway-url https://GATEWAY_URL --region US-EAST --model llama3.2 --reverse
+# Expert node (WAN)
+microwave-node --gateway-url https://GATEWAY_URL --region US-EAST --model llama3.2 \
+  --expert-domains math,science --reverse
 ```
 
-Use `--no-chat` for headless/daemon mode.
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MICROWAVE_GATEWAY_URL` | — | Gateway address |
+| `MICROWAVE_MODEL` | `llama3` | Model to run |
+| `MICROWAVE_REGION` | `LAN` | Region label |
+| `MICROWAVE_EXPERT_DOMAINS` | `general` | Comma-separated domains |
+| `MICROWAVE_LAT` / `MICROWAVE_LON` | auto-detected | GPS coordinates |
+| `MICROWAVE_ENGINE` | `ollama` | Inference engine |
+| `MICROWAVE_DRAFT_MODELS` | — | Draft models for speculative decoding |
 
 </details>
