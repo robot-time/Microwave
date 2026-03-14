@@ -18,10 +18,18 @@ Anyone can run a node. Nodes contribute compute as **experts**. A router picks t
 
 ## Quickstart
 
-**Requirements:** [Python 3.10+](https://python.org), [Git](https://git-scm.com), and [curl](https://curl.se).
+**Requirements:** [Python 3.10+](https://python.org) and [Git](https://git-scm.com).
+
+**macOS / Linux:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/robot-time/Microwave/main/install.sh | sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/robot-time/Microwave/main/install.ps1 | iex
 ```
 
 That's it. One command. It clones the repo, creates a venv, installs Ollama + a model, and connects your machine to the network as an expert node.
@@ -30,6 +38,10 @@ With options:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/robot-time/Microwave/main/install.sh | MICROWAVE_EXPERT_DOMAINS=code,math sh
+```
+
+```powershell
+$env:MICROWAVE_EXPERT_DOMAINS = "code,math"; irm https://raw.githubusercontent.com/robot-time/Microwave/main/install.ps1 | iex
 ```
 
 After the first run, use the `microwave` command from anywhere:
@@ -41,8 +53,6 @@ microwave gateway                      # start the gateway server
 microwave status                       # check network health + experts
 microwave version                      # print version
 ```
-
-> **Windows:** Install Python from the Microsoft Store and [Git for Windows](https://git-scm.com/download/win), then run the commands above in **Git Bash**.
 
 ### Expert domains
 
