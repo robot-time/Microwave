@@ -144,5 +144,6 @@ ARGS="$ARGS --expert-domains $EXPERT_DOMAINS"
 [ -n "$DRAFT_MODELS" ] && ARGS="$ARGS --draft-models $DRAFT_MODELS"
 
 echo -e "${G}Setup complete.${X} Connecting to network ..."
+echo -e "  Next time, just run: ${C}microwave run${X}"
 echo ""
-exec microwave-node $ARGS
+exec microwave run $ARGS

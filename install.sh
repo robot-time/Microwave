@@ -119,9 +119,11 @@ printf "  ${C}Model${X}    %s\n" "$MODEL"
 printf "  ${C}Domains${X}  %s\n" "$EXPERT_DOMAINS"
 printf "  ${C}Gateway${X}  %s\n" "$GATEWAY_URL"
 [ "$LAT" != "0.0" ] && printf "  ${C}Location${X} %s, %s\n" "$LAT" "$LON"
-printf "\n${G}Setup complete.${X} Connecting to network ...\n\n"
+printf "\n${G}Setup complete.${X} Connecting to network ...\n"
+printf "  Next time, just run: ${C}microwave run${X}\n"
+printf "  Check the network:   ${C}microwave status${X}\n\n"
 
-exec microwave-node \
+exec microwave run \
   --gateway-url "$GATEWAY_URL" \
   --region "$REGION" \
   --model "$MODEL" \

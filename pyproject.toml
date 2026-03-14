@@ -1,7 +1,7 @@
 [project]
 name = "microwave-ai"
 version = "0.3.0"
-description = "Decentralized AI inference with pipeline parallelism, speculative decoding, and latency-optimized routing."
+description = "Decentralized AI inference with Mixture of Experts, parallel dispatch, and latency-optimized routing."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -21,6 +21,7 @@ pipeline = [
 ]
 
 [project.scripts]
+microwave = "microwave_ai.cli:main"
 microwave-gateway = "microwave_ai.gateway:main"
 microwave-node = "microwave_ai.node:main"
 

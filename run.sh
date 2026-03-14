@@ -18,7 +18,7 @@ VENV_BIN=""
 export PATH="$VENV_BIN:$PATH"
 source "$CONFIG_FILE"
 
-command -v microwave-node >/dev/null 2>&1 || { pip install -e . -q 2>/dev/null || pip install -e .; }
+command -v microwave >/dev/null 2>&1 || { pip install -e . -q 2>/dev/null || pip install -e .; }
 
 echo -e "${B}Microwave${X}  ${C}$MICROWAVE_MODEL${X}  ->  ${C}$MICROWAVE_GATEWAY_URL${X}"
 
@@ -29,4 +29,4 @@ ARGS="$ARGS --reverse"
 ARGS="$ARGS --expert-domains ${MICROWAVE_EXPERT_DOMAINS:-general}"
 [ -n "$MICROWAVE_DRAFT_MODELS" ] && ARGS="$ARGS --draft-models $MICROWAVE_DRAFT_MODELS"
 
-exec microwave-node $ARGS
+exec microwave run $ARGS

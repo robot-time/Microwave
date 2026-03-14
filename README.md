@@ -32,10 +32,14 @@ With options:
 curl -fsSL https://raw.githubusercontent.com/robot-time/Microwave/main/install.sh | MICROWAVE_EXPERT_DOMAINS=code,math sh
 ```
 
-After the first run, re-launch from the install directory:
+After the first run, use the `microwave` command from anywhere:
 
 ```bash
-cd ~/Microwave && bash run.sh
+microwave run                          # start your expert node
+microwave run --expert-domains code    # start as a code expert
+microwave gateway                      # start the gateway server
+microwave status                       # check network health + experts
+microwave version                      # print version
 ```
 
 > **Windows:** Install Python from the Microsoft Store and [Git for Windows](https://git-scm.com/download/win), then run the commands above in **Git Bash**.
