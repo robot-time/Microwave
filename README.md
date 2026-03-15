@@ -7,7 +7,7 @@
     ||___________|[_]|
     '----------------'
 
-Microwave AI
+Microwave AI (Alpha)
 ============
 
 > Decentralized AI inference – **BitTorrent for AI**.
