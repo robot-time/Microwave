@@ -18,6 +18,30 @@ function Write-Color($Color, $Text) {
     Write-Host $Text -ForegroundColor $Color -NoNewline
 }
 
+function Command-Exists([string]$Name) {
+    return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Try-Install-WithWinget([string]$Id) {
+    if (-not (Command-Exists "winget")) { return $false }
+    try {
+        winget install --id $Id --accept-package-agreements --accept-source-agreements --silent
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function Try-Install-WithChoco([string]$Package) {
+    if (-not (Command-Exists "choco")) { return $false }
+    try {
+        choco install $Package -y
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
 Write-Host ""
 Write-Host "     ________________"
 Write-Host "    |.-----------.   |"
@@ -31,7 +55,7 @@ Write-Host ""
 Write-Color Cyan "Microwave AI"; Write-Host " - Windows installer"
 Write-Host ""
 
-# ── check prerequisites ──────────────────────────
+# ── check prerequisites (auto-install where possible) ──────────────────────────
 
 $Python = $null
 foreach ($cmd in @("python3", "python")) {
@@ -42,16 +66,35 @@ foreach ($cmd in @("python3", "python")) {
 }
 
 if (-not $Python) {
-    Write-Host "Python not found. Install Python 3.10+: https://python.org" -ForegroundColor Red
-    Write-Host "  Tip: 'winget install Python.Python.3.12' or install from Microsoft Store"
-    exit 1
+    Write-Host "Python not found. Attempting auto-install..." -ForegroundColor Yellow
+    $ok = (Try-Install-WithWinget "Python.Python.3.12") -or (Try-Install-WithChoco "python")
+    if ($ok) {
+        foreach ($cmd in @("python3", "python")) {
+            try {
+                $ver = & $cmd --version 2>&1
+                if ($LASTEXITCODE -eq 0) { $Python = $cmd; break }
+            } catch {}
+        }
+    }
+    if (-not $Python) {
+        Write-Host "Python not found. Install Python 3.10+: https://python.org" -ForegroundColor Red
+        Write-Host "  Tip: 'winget install Python.Python.3.12' or install from Microsoft Store"
+        exit 1
+    }
+    Write-Host "Python installed: $Python" -ForegroundColor Green
 }
 
-$gitExists = Get-Command git -ErrorAction SilentlyContinue
+$gitExists = Command-Exists "git"
 if (-not $gitExists) {
-    Write-Host "Git not found. Install git: https://git-scm.com" -ForegroundColor Red
-    Write-Host "  Tip: 'winget install Git.Git'"
-    exit 1
+    Write-Host "Git not found. Attempting auto-install..." -ForegroundColor Yellow
+    $ok = (Try-Install-WithWinget "Git.Git") -or (Try-Install-WithChoco "git")
+    $gitExists = Command-Exists "git"
+    if (-not ($ok -and $gitExists)) {
+        Write-Host "Git not found. Install git: https://git-scm.com" -ForegroundColor Red
+        Write-Host "  Tip: 'winget install Git.Git'"
+        exit 1
+    }
+    Write-Host "Git installed." -ForegroundColor Green
 }
 
 # ── clone or update ──────────────────────────────
