@@ -1131,7 +1131,7 @@ def _build_chat_ui_html() -> str:
       <span class="top-title">Microwave AI</span>
       <div class="pill-row">
         <span class="pill mono" id="routePill">POST /chat</span>
-        <span class="pill mono">region LAN</span>
+        <span class="pill mono" id="activeRegionTag">region LAN</span>
         <span class="pill mono" id="activeModelTag">model llama3.2</span>
       </div>
     </div>
@@ -1160,6 +1160,10 @@ def _build_chat_ui_html() -> str:
         <textarea id="promptInput" rows="1" placeholder="Send a message"></textarea>
         <div class="input-footer">
           <div class="input-left">
+            <select id="regionSelect" class="model-select">
+              <option value="LAN">LAN</option>
+              <option value="ADL">ADL</option>
+            </select>
             <select id="modelSelect" class="model-select">
               <option value="llama3.2">llama3.2</option>
               <option value="llama3">llama3</option>
@@ -1183,10 +1187,12 @@ def _build_chat_ui_html() -> str:
   const emptyState = document.getElementById('emptyState');
   const promptEl = document.getElementById('promptInput');
   const sendBtn = document.getElementById('sendBtn');
+  const regionSelect = document.getElementById('regionSelect');
   const modelSelect = document.getElementById('modelSelect');
   const historyList = document.getElementById('historyList');
   const statusText = document.getElementById('statusText');
   const activeModelTag = document.getElementById('activeModelTag');
+  const activeRegionTag = document.getElementById('activeRegionTag');
   const routePill = document.getElementById('routePill');
   const suggestionButtons = Array.from(document.querySelectorAll('.suggestion'));
 
@@ -1299,6 +1305,7 @@ def _build_chat_ui_html() -> str:
   promptEl.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); } });
   sendBtn.addEventListener('click', doSend);
   modelSelect.addEventListener('change', () => { activeModelTag.textContent = 'model ' + modelSelect.value; });
+  regionSelect.addEventListener('change', () => { activeRegionTag.textContent = 'region ' + regionSelect.value; });
   suggestionButtons.forEach(btn => btn.addEventListener('click', () => { promptEl.value = btn.textContent; promptEl.dispatchEvent(new Event('input')); promptEl.focus(); }));
 
   async function doSend() {
@@ -1316,7 +1323,7 @@ def _build_chat_ui_html() -> str:
     const loading = createLoadingBubble();
     let fullText = '', converted = false;
     try {
-      const res = await fetch('/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, region: 'LAN', model: modelSelect.value }) });
+      const res = await fetch('/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt, region: regionSelect.value, model: modelSelect.value }) });
       if (!res.ok || !res.body) { loading.bubble.classList.remove('loading'); loading.bubble.textContent = 'Error: ' + res.status; return; }
       const reader = res.body.getReader(); const decoder = new TextDecoder(); let buf = '';
       while (true) {
@@ -1345,7 +1352,10 @@ def _build_chat_ui_html() -> str:
     finally { isSending = false; sendBtn.classList.remove('sending'); updateSendBtn(); promptEl.focus(); }
   }
   document.getElementById('newChatBtn').addEventListener('click', () => { newSession(); promptEl.focus(); });
-  newSession(); activeModelTag.textContent = 'model ' + modelSelect.value; promptEl.focus();
+  newSession();
+  activeModelTag.textContent = 'model ' + modelSelect.value;
+  activeRegionTag.textContent = 'region ' + regionSelect.value;
+  promptEl.focus();
 </script>
 </body>
 </html>
