@@ -80,10 +80,17 @@ Write-Host ""
 # ── check prerequisites (auto-install where possible) ──────────────────────────
 
 $Python = $null
+$PythonBaseArgs = @()
 foreach ($cmd in @("python3", "python")) {
     try {
         $ver = & $cmd --version 2>&1
-        if ($LASTEXITCODE -eq 0) { $Python = $cmd; break }
+        if ($LASTEXITCODE -eq 0) { $Python = $cmd; $PythonBaseArgs = @(); break }
+    } catch {}
+}
+if (-not $Python -and (Command-Exists "py")) {
+    try {
+        $ver = & py -3 --version 2>&1
+        if ($LASTEXITCODE -eq 0) { $Python = "py"; $PythonBaseArgs = @("-3") }
     } catch {}
 }
 
@@ -94,7 +101,13 @@ if (-not $Python) {
         foreach ($cmd in @("python3", "python")) {
             try {
                 $ver = & $cmd --version 2>&1
-                if ($LASTEXITCODE -eq 0) { $Python = $cmd; break }
+                if ($LASTEXITCODE -eq 0) { $Python = $cmd; $PythonBaseArgs = @(); break }
+            } catch {}
+        }
+        if (-not $Python -and (Command-Exists "py")) {
+            try {
+                $ver = & py -3 --version 2>&1
+                if ($LASTEXITCODE -eq 0) { $Python = "py"; $PythonBaseArgs = @("-3") }
             } catch {}
         }
     }
@@ -103,7 +116,7 @@ if (-not $Python) {
         Write-Host "  Tip: 'winget install Python.Python.3.12' or install from Microsoft Store"
         exit 1
     }
-    Write-Host "Python installed: $Python" -ForegroundColor Green
+    Write-Host "Python installed: $Python $($PythonBaseArgs -join ' ')" -ForegroundColor Green
 }
 
 $gitExists = Command-Exists "git"
@@ -138,7 +151,7 @@ Write-Host ""
 Write-Host "[1/3] " -NoNewline; Write-Host "Python environment" -ForegroundColor White
 
 if (-not (Test-Path ".venv")) {
-    Run-Exe -FilePath $Python -ArgumentList @("-m", "venv", ".venv")
+    Run-Exe -FilePath $Python -ArgumentList ($PythonBaseArgs + @("-m", "venv", ".venv"))
 }
 
 $VenvBin = $null
@@ -152,12 +165,12 @@ if (-not $VenvBin) {
 
 $env:PATH = "$VenvBin;$env:PATH"
 try {
-    Run-Exe -FilePath $Python -ArgumentList @("-m", "pip", "install", "--upgrade", "pip", "-q")
+    Run-Exe -FilePath $Python -ArgumentList ($PythonBaseArgs + @("-m", "pip", "install", "--upgrade", "pip", "-q"))
 } catch {}
 try {
-    Run-Exe -FilePath $Python -ArgumentList @("-m", "pip", "install", "-e", ".", "-q")
+    Run-Exe -FilePath $Python -ArgumentList ($PythonBaseArgs + @("-m", "pip", "install", "-e", ".", "-q"))
 } catch {
-    Run-Exe -FilePath $Python -ArgumentList @("-m", "pip", "install", "-e", ".")
+    Run-Exe -FilePath $Python -ArgumentList ($PythonBaseArgs + @("-m", "pip", "install", "-e", "."))
 }
 Write-Host "  done" -ForegroundColor Green
 
@@ -221,11 +234,21 @@ if ($Lat -ne "0.0") { Write-Host "  Location $Lat, $Lon" -ForegroundColor Cyan }
 Write-Host ""
 Write-Host "Setup complete. " -ForegroundColor Green -NoNewline
 Write-Host "Connecting to network ..."
-Write-Host "  Next time, just run: " -NoNewline; Write-Host "microwave run" -ForegroundColor Cyan
-Write-Host "  Check the network:   " -NoNewline; Write-Host "microwave status" -ForegroundColor Cyan
+Write-Host "  Next time, run from install dir: " -NoNewline; Write-Host "$InstallDir" -ForegroundColor Cyan
+Write-Host "    .\.venv\Scripts\microwave.exe run" -ForegroundColor DarkGray
+Write-Host "    .\.venv\Scripts\microwave.exe status" -ForegroundColor DarkGray
 Write-Host ""
 
-& microwave run `
+$MicrowaveExe = Join-Path $VenvBin "microwave.exe"
+if (-not (Test-Path $MicrowaveExe)) {
+    $MicrowaveExe = Join-Path $VenvBin "microwave"
+}
+if (-not (Test-Path $MicrowaveExe)) {
+    Write-Host "microwave CLI not found in venv. Try: $Python -m pip install -e ." -ForegroundColor Red
+    exit 1
+}
+
+& $MicrowaveExe run `
     --gateway-url $GatewayUrl `
     --region $Region `
     --model $Model `

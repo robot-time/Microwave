@@ -115,6 +115,43 @@ The `strategy` field controls aggregation: `fastest` (default), `confidence`, or
 
 ---
 
+## Troubleshooting
+
+### Laptops with admin protection (Windows)
+
+Some school or work laptops block **running PowerShell scripts** (execution policy) or **elevated installs** (winget/chocolatey). You can still use Microwave without changing policy or asking IT.
+
+**“Running scripts is disabled on this system”** when you run `Activate.ps1`  
+Do **not** rely on venv activation. Call the venv’s Python directly — that is not a script policy issue:
+
+```powershell
+cd $HOME\Microwave
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e .
+```
+
+**No `microwave.exe` in `.venv\Scripts`**  
+The CLI wrapper is created by `pip install -e .`. If it’s missing, reinstall with the commands above. You can run the node **without** the `microwave` shim:
+
+```powershell
+cd $HOME\Microwave
+.\.venv\Scripts\python.exe -m microwave_ai.node --reverse `
+  --gateway-url "https://YOUR-GATEWAY" `
+  --region "LAN" `
+  --model "llama3.2" `
+  --expert-domains "general"
+```
+
+Use `py -3` instead of `.\.venv\Scripts\python.exe` only if that’s how Python was installed and the venv path differs.
+
+**PowerShell window closes right after `irm … | iex`**  
+The one-liner may exit when the host closes. Open **PowerShell manually**, `cd` to `%USERPROFILE%\Microwave`, then run the `python.exe -m microwave_ai.node` command above so output stays visible.
+
+**Python from python.org (per-user install)**  
+If only the **`py`** launcher is on PATH, detection should still work. If auto-install asks for admin, skip it — install Python yourself from [python.org](https://www.python.org/downloads/) (choose “Install for current user” when offered).
+
+---
+
 <details>
 <summary><strong>Architecture deep dive</strong></summary>
 
