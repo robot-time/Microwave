@@ -22,12 +22,69 @@ CONFIG_FILE=".microwave.env"
 C="\033[1;36m"; G="\033[1;32m"; Y="\033[1;33m"; R="\033[1;31m"
 B="\033[1m"; D="\033[2m"; X="\033[0m"
 
-# ── find python ──────────────────────────────
-PYTHON=""
-for cmd in python3 python; do
-  command -v "$cmd" >/dev/null 2>&1 && { PYTHON="$cmd"; break; }
-done
-[ -z "$PYTHON" ] && { echo -e "${R}Python not found. Install Python 3.10+.${X}"; exit 1; }
+# ── dependency checks / auto-install ──────────────────────────────
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+try_install_pkg() {
+  local pkg="$1"
+  if have_cmd brew; then
+    brew install "$pkg" && return 0
+  fi
+  if have_cmd apt-get; then
+    sudo apt-get update -y && sudo apt-get install -y "$pkg" && return 0
+  fi
+  if have_cmd dnf; then
+    sudo dnf install -y "$pkg" && return 0
+  fi
+  if have_cmd yum; then
+    sudo yum install -y "$pkg" && return 0
+  fi
+  if have_cmd pacman; then
+    sudo pacman -Sy --noconfirm "$pkg" && return 0
+  fi
+  return 1
+}
+
+ensure_git() {
+  if have_cmd git; then
+    return 0
+  fi
+  echo -e "${Y}Git not found. Attempting auto-install...${X}"
+  if try_install_pkg git; then
+    echo -e "${G}Git installed.${X}"
+    return 0
+  fi
+  echo -e "${R}Git is required but could not be auto-installed.${X}"
+  echo -e "${Y}Install git manually: https://git-scm.com/downloads${X}"
+  exit 1
+}
+
+ensure_python() {
+  PYTHON=""
+  for cmd in python3 python; do
+    have_cmd "$cmd" && { PYTHON="$cmd"; break; }
+  done
+  if [ -n "$PYTHON" ]; then
+    return 0
+  fi
+
+  echo -e "${Y}Python not found. Attempting auto-install...${X}"
+  if try_install_pkg python3; then
+    for cmd in python3 python; do
+      have_cmd "$cmd" && { PYTHON="$cmd"; break; }
+    done
+  fi
+
+  if [ -z "$PYTHON" ]; then
+    echo -e "${R}Python 3.10+ is required but could not be auto-installed.${X}"
+    echo -e "${Y}Install Python manually: https://python.org${X}"
+    exit 1
+  fi
+  echo -e "${G}Python installed: $PYTHON${X}"
+}
+
+ensure_git
+ensure_python
 
 # ── clone if needed ──────────────────────────
 if [ ! -f "pyproject.toml" ]; then
