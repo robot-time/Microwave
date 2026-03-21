@@ -42,6 +42,28 @@ function Try-Install-WithChoco([string]$Package) {
     }
 }
 
+function Run-Exe {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $false)][string[]]$ArgumentList = @(),
+        [Parameter(Mandatory = $false)][string]$WorkingDirectory = $null
+    )
+    $sp = @{
+        FilePath    = $FilePath
+        ArgumentList = $ArgumentList
+        Wait        = $true
+        NoNewWindow = $true
+        PassThru    = $true
+    }
+    if ($WorkingDirectory) {
+        $sp.WorkingDirectory = $WorkingDirectory
+    }
+    $p = Start-Process @sp
+    if ($p.ExitCode -ne 0) {
+        throw "$FilePath failed with exit code $($p.ExitCode)"
+    }
+}
+
 Write-Host ""
 Write-Host "     ________________"
 Write-Host "    |.-----------.   |"
@@ -101,16 +123,11 @@ if (-not $gitExists) {
 
 if (Test-Path "$InstallDir\.git") {
     Write-Host "Updating existing install at $InstallDir..." -ForegroundColor DarkGray
-    Push-Location $InstallDir
-    try {
-        & git pull --ff-only 2>$null
-    } finally {
-        Pop-Location
-    }
+    Run-Exe -FilePath "git" -ArgumentList @("pull", "--ff-only") -WorkingDirectory $InstallDir
 } else {
     Write-Host "Cloning Microwave into " -NoNewline
     Write-Color Cyan $InstallDir; Write-Host "..."
-    git clone $RepoUrl $InstallDir
+    Run-Exe -FilePath "git" -ArgumentList @("clone", $RepoUrl, $InstallDir)
 }
 
 Set-Location $InstallDir
@@ -121,7 +138,7 @@ Write-Host ""
 Write-Host "[1/3] " -NoNewline; Write-Host "Python environment" -ForegroundColor White
 
 if (-not (Test-Path ".venv")) {
-    & $Python -m venv .venv
+    Run-Exe -FilePath $Python -ArgumentList @("-m", "venv", ".venv")
 }
 
 $VenvBin = $null
@@ -134,9 +151,14 @@ if (-not $VenvBin) {
 }
 
 $env:PATH = "$VenvBin;$env:PATH"
-& pip install --upgrade pip -q 2>$null
-& pip install -e . -q 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) { & pip install -e . 2>&1 }
+try {
+    Run-Exe -FilePath $Python -ArgumentList @("-m", "pip", "install", "--upgrade", "pip", "-q")
+} catch {}
+try {
+    Run-Exe -FilePath $Python -ArgumentList @("-m", "pip", "install", "-e", ".", "-q")
+} catch {
+    Run-Exe -FilePath $Python -ArgumentList @("-m", "pip", "install", "-e", ".")
+}
 Write-Host "  done" -ForegroundColor Green
 
 # ── ollama ───────────────────────────────────────
