@@ -1061,7 +1061,18 @@ def _build_chat_ui_html() -> str:
     .meta .who { color: var(--text); }
     .bubble { max-width: min(720px, 80%); font-size: 0.9rem; line-height: 1.55; }
     .msg-row.user .bubble { background: var(--text); color: var(--btn-text); border-radius: 0.85rem 0.85rem 0.2rem 0.85rem; padding: 0.55rem 0.85rem; }
-    .msg-row.bot .bubble { background: var(--panel); border: 1px solid var(--border); border-radius: 0.85rem 0.85rem 0.85rem 0.2rem; padding: 0.55rem 0.85rem; color: var(--text); white-space: pre-wrap; }
+    .msg-row.bot .bubble { background: var(--panel); border: 1px solid var(--border); border-radius: 0.85rem 0.85rem 0.85rem 0.2rem; padding: 0.55rem 0.85rem; color: var(--text); }
+    .msg-row.bot .bubble p { margin: 0.4rem 0; }
+    .msg-row.bot .bubble p:first-child { margin-top: 0; }
+    .msg-row.bot .bubble p:last-child { margin-bottom: 0; }
+    .msg-row.bot .bubble h1, .msg-row.bot .bubble h2, .msg-row.bot .bubble h3 { margin: 0.6rem 0 0.35rem; line-height: 1.25; }
+    .msg-row.bot .bubble ul, .msg-row.bot .bubble ol { margin: 0.35rem 0 0.35rem 1.25rem; }
+    .msg-row.bot .bubble li { margin: 0.2rem 0; }
+    .msg-row.bot .bubble pre { margin: 0.5rem 0; padding: 0.6rem; border-radius: 0.45rem; background: #0a0d14; border: 1px solid var(--border); overflow-x: auto; }
+    .msg-row.bot .bubble code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; background: rgba(255,255,255,0.06); padding: 0.08rem 0.26rem; border-radius: 0.25rem; }
+    .msg-row.bot .bubble pre code { background: transparent; padding: 0; border-radius: 0; }
+    .msg-row.bot .bubble a { color: var(--brand); text-decoration: underline; }
+    .msg-row.bot .bubble blockquote { margin: 0.5rem 0; padding-left: 0.7rem; border-left: 3px solid var(--border); color: var(--text-muted); }
     .bubble.loading { border-style: dashed; color: var(--text-muted); }
     .loading-dots { display: inline-flex; gap: 0.25rem; }
     .loading-dots span { width: 4px; height: 4px; border-radius: 50%; background: var(--text-muted); animation: blink 1s ease-in-out infinite; }
@@ -1200,12 +1211,78 @@ def _build_chat_ui_html() -> str:
   }
   function nowStamp() { return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
 
+  function escapeHtml(str) {
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function renderMarkdown(md) {
+    let html = escapeHtml(md);
+
+    // Fenced code blocks
+    html = html.replace(/```([a-zA-Z0-9_-]+)?\n([\s\S]*?)```/g, (_m, _lang, code) =>
+      '<pre><code>' + code.trimEnd() + '</code></pre>'
+    );
+
+    // Inline code
+    html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+    // Headings
+    html = html.replace(/^### (.*)$/gm, '<h3>$1</h3>');
+    html = html.replace(/^## (.*)$/gm, '<h2>$1</h2>');
+    html = html.replace(/^# (.*)$/gm, '<h1>$1</h1>');
+
+    // Blockquotes
+    html = html.replace(/^> (.*)$/gm, '<blockquote>$1</blockquote>');
+
+    // Bold / italic
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+
+    // Links
+    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+    // Unordered lists
+    html = html.replace(/(?:^|\n)((?:[-*] .*(?:\n|$))+)/g, (m, block) => {
+      const items = block.trim().split('\n').map(line => line.replace(/^[-*] /, '').trim());
+      return '\n<ul>' + items.map(i => '<li>' + i + '</li>').join('') + '</ul>\n';
+    });
+
+    // Ordered lists
+    html = html.replace(/(?:^|\n)((?:\d+\. .*(?:\n|$))+)/g, (m, block) => {
+      const items = block.trim().split('\n').map(line => line.replace(/^\d+\. /, '').trim());
+      return '\n<ol>' + items.map(i => '<li>' + i + '</li>').join('') + '</ol>\n';
+    });
+
+    // Paragraphs for remaining lines
+    html = html
+      .split('\n\n')
+      .map(chunk => {
+        const t = chunk.trim();
+        if (!t) return '';
+        if (/^<(h1|h2|h3|ul|ol|pre|blockquote)/.test(t)) return t;
+        return '<p>' + t.replace(/\n/g, '<br>') + '</p>';
+      })
+      .join('');
+
+    return html;
+  }
+
   function appendBubble(role, text, opts = {}) {
     const row = document.createElement('div'); row.className = 'msg-row ' + role;
     const meta = document.createElement('div'); meta.className = 'meta';
     meta.innerHTML = '<span class="who">' + (role === 'user' ? 'You' : 'Microwave AI') + (opts.model ? ' &middot; ' + opts.model : '') + '</span><span>' + (opts.time || nowStamp()) + '</span>';
     row.appendChild(meta);
-    const bubble = document.createElement('div'); bubble.className = 'bubble'; bubble.textContent = text;
+    const bubble = document.createElement('div'); bubble.className = 'bubble';
+    if (role === 'bot') {
+      bubble.innerHTML = renderMarkdown(text);
+    } else {
+      bubble.textContent = text;
+    }
     row.appendChild(bubble);
     messagesEl.appendChild(row);
     messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -1255,14 +1332,14 @@ def _build_chat_ui_html() -> str:
               routePill.textContent = (obj.route.mode || 'direct') + ' (' + (obj.route.strategy || '?') + ') via ' + (experts || obj.route.node_id || '?');
             }
             if (typeof obj.response === 'string') {
-              if (!converted) { converted = true; loading.bubble.classList.remove('loading'); loading.bubble.textContent = ''; }
-              fullText += obj.response; loading.bubble.textContent = fullText; messagesEl.scrollTop = messagesEl.scrollHeight;
+              if (!converted) { converted = true; loading.bubble.classList.remove('loading'); loading.bubble.innerHTML = ''; }
+              fullText += obj.response; loading.bubble.innerHTML = renderMarkdown(fullText); messagesEl.scrollTop = messagesEl.scrollHeight;
             }
-          } catch (e) { if (!converted) { converted = true; loading.bubble.classList.remove('loading'); loading.bubble.textContent = ''; } fullText += line; loading.bubble.textContent = fullText; }
+          } catch (e) { if (!converted) { converted = true; loading.bubble.classList.remove('loading'); loading.bubble.innerHTML = ''; } fullText += line; loading.bubble.innerHTML = renderMarkdown(fullText); }
         }
       }
-      if (!converted) { loading.bubble.classList.remove('loading'); loading.bubble.textContent = fullText || 'No response.'; }
-      s.messages.push({ role: 'bot', text: fullText || loading.bubble.textContent, model: modelSelect.value, time: nowStamp() });
+      if (!converted) { loading.bubble.classList.remove('loading'); loading.bubble.innerHTML = renderMarkdown(fullText || 'No response.'); }
+      s.messages.push({ role: 'bot', text: fullText || 'No response.', model: modelSelect.value, time: nowStamp() });
       statusText.textContent = 'Served by Microwave network';
     } catch (e) { loading.bubble.classList.remove('loading'); loading.bubble.textContent = 'Error: ' + e.message; statusText.textContent = 'Error'; }
     finally { isSending = false; sendBtn.classList.remove('sending'); updateSendBtn(); promptEl.focus(); }
