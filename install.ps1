@@ -101,7 +101,12 @@ if (-not $gitExists) {
 
 if (Test-Path "$InstallDir\.git") {
     Write-Host "Updating existing install at $InstallDir..." -ForegroundColor DarkGray
-    git -C $InstallDir pull --ff-only 2>$null
+    Push-Location $InstallDir
+    try {
+        & git pull --ff-only 2>$null
+    } finally {
+        Pop-Location
+    }
 } else {
     Write-Host "Cloning Microwave into " -NoNewline
     Write-Color Cyan $InstallDir; Write-Host "..."
